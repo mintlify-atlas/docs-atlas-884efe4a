@@ -1,81 +1,345 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: Install Archon and Run Your First Workflow"
+description: "Two paths to get Archon running: a 30-second binary install for existing Claude Code users, or a 5-minute full setup with the guided wizard and web dashboard."
+keywords: ["archon install", "quickstart", "archon setup", "first workflow", "cli install"]
 ---
 
-## Get started in three steps
+Archon offers two installation paths depending on how much you want to configure upfront. The **Quick Install** gives you a standalone binary in 30 seconds — ideal if you already have Claude Code set up. The **Full Setup** clones the repo, runs the guided wizard, installs credentials, and gives you the web dashboard — recommended for most users.
 
-Get your documentation site running locally and make your first customization.
+<Tabs>
+  <Tab title="Quick Install (30s)">
 
-### Step 1: Set up your local environment
+    The quick install delivers a pre-compiled `archon` binary. Claude Code is not bundled — you need it separately.
+
+    <Steps>
+      <Step title="Install Archon">
+
+        <Tabs>
+          <Tab title="macOS / Linux">
+            ```bash
+            curl -fsSL https://archon.diy/install | bash
+            ```
+          </Tab>
+          <Tab title="Windows (PowerShell)">
+            ```powershell
+            irm https://archon.diy/install.ps1 | iex
+            ```
+          </Tab>
+          <Tab title="Homebrew">
+            ```bash
+            brew install coleam00/archon/archon
+            ```
+          </Tab>
+        </Tabs>
+
+      </Step>
+
+      <Step title="Install and authenticate Claude Code">
+
+        Compiled Archon binaries require Claude Code to be installed separately, then pointed at via `CLAUDE_BIN_PATH`.
+
+        <Tabs>
+          <Tab title="macOS / Linux / WSL">
+            ```bash
+            curl -fsSL https://claude.ai/install.sh | bash
+            export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
+            ```
+          </Tab>
+          <Tab title="Windows (PowerShell)">
+            ```powershell
+            irm https://claude.ai/install.ps1 | iex
+            $env:CLAUDE_BIN_PATH = "$env:USERPROFILE\.local\bin\claude.exe"
+            ```
+          </Tab>
+        </Tabs>
+
+        To make `CLAUDE_BIN_PATH` permanent, add it to your shell profile, or set it in `~/.archon/config.yaml`:
+
+        ```yaml ~/.archon/config.yaml
+        assistants:
+          claude:
+            claudeBinaryPath: /home/yourname/.local/bin/claude
+        ```
+
+        Then authenticate Claude Code:
+
+        ```bash
+        claude /login
+        ```
+
+      </Step>
+
+      <Step title="Verify the install">
+
+        ```bash
+        archon version
+        archon doctor
+        ```
+
+        `archon doctor` checks your Claude binary path, authentication, and database. Address any warnings before continuing.
+
+      </Step>
+    </Steps>
+
+  </Tab>
+  <Tab title="Full Setup (5min)">
+
+    The full setup clones the repo and runs an interactive wizard that configures credentials, platform integrations, and installs the Archon skill into your target projects.
+
+    <Steps>
+      <Step title="Install prerequisites">
+
+        You need Bun, the GitHub CLI, and Claude Code.
+
+        **Bun:**
+
+        <Tabs>
+          <Tab title="macOS / Linux">
+            ```bash
+            curl -fsSL https://bun.sh/install | bash
+            ```
+          </Tab>
+          <Tab title="Windows (PowerShell)">
+            ```powershell
+            irm bun.sh/install.ps1 | iex
+            ```
+          </Tab>
+        </Tabs>
+
+        **GitHub CLI:**
+
+        <Tabs>
+          <Tab title="macOS">
+            ```bash
+            brew install gh
+            ```
+          </Tab>
+          <Tab title="Linux (Debian/Ubuntu)">
+            ```bash
+            sudo apt install gh
+            ```
+          </Tab>
+          <Tab title="Windows">
+            ```powershell
+            winget install GitHub.cli
+            ```
+          </Tab>
+        </Tabs>
+
+        **Claude Code:**
+
+        <Tabs>
+          <Tab title="macOS / Linux / WSL">
+            ```bash
+            curl -fsSL https://claude.ai/install.sh | bash
+            ```
+          </Tab>
+          <Tab title="Windows (PowerShell)">
+            ```powershell
+            irm https://claude.ai/install.ps1 | iex
+            ```
+          </Tab>
+        </Tabs>
+
+      </Step>
+
+      <Step title="Clone and install">
+
+        ```bash
+        git clone https://github.com/coleam00/Archon
+        cd Archon
+        bun install
+        ```
+
+        `bun install` takes about 30 seconds and sets up the full monorepo.
+
+      </Step>
+
+      <Step title="Run the setup wizard">
+
+        Open Claude Code in the Archon directory and say "Set up Archon":
+
+        ```bash
+        claude
+        ```
+
+        ```
+        Set up Archon
+        ```
+
+        The wizard walks you through:
+
+        - Choosing an AI assistant (Claude, Codex, or Pi)
+        - Configuring authentication credentials
+        - Selecting optional platform adapters (Telegram, Slack, GitHub)
+        - Installing the Archon skill into your target project
+
+        <Note>
+          Run Claude Code from your **target project** after setup — not from the Archon repo. The wizard copies the Archon skill into your project so it works from there.
+        </Note>
+
+      </Step>
+
+      <Step title="Start the server (web UI)">
+
+        ```bash
+        bun run dev
+        ```
+
+        This starts two processes:
+
+        - **Backend API** on `http://localhost:3090`
+        - **Web UI** on `http://localhost:5173`
+
+        Open [http://localhost:5173](http://localhost:5173) and click **+** next to "Project" to register your first repository.
+
+      </Step>
+    </Steps>
+
+  </Tab>
+</Tabs>
+
+---
+
+## Run your first workflow
+
+With Archon installed, navigate to any git repository and run a workflow.
+
+<Steps>
+  <Step title="Go to your project">
+
+    ```bash
+    cd /path/to/your/project
+    ```
+
+    <Warning>
+      Your project must be a git repository. Archon uses git worktrees for isolation. If it isn't one yet: `git init && git add . && git commit -m "initial commit"`.
+    </Warning>
+
+  </Step>
+
+  <Step title="See what workflows are available">
+
+    ```bash
+    archon workflow list
+    ```
+
+    Archon ships 17 bundled workflows. You'll see them alongside any project-specific workflows from `.archon/workflows/`.
+
+  </Step>
+
+  <Step title="Ask a question about the codebase">
+
+    The `archon-assist` workflow is the lowest-friction starting point — no isolation required:
+
+    ```bash
+    archon workflow run assist "What does this codebase do? Give me a high-level summary."
+    ```
+
+  </Step>
+
+  <Step title="Fix an issue on an isolated branch">
+
+    ```bash
+    archon workflow run fix-github-issue --branch fix/issue-42 "Fix issue #42"
+    ```
+
+    Archon creates a worktree on `fix/issue-42`, then runs the full pipeline: classify → investigate → implement → validate → PR → review → self-fix. Progress streams to your terminal in real time.
+
+  </Step>
+
+  <Step title="Let the router choose the workflow">
+
+    You don't need to remember workflow names. Describe what you want — the router reads all workflow descriptions and picks the best match:
+
+    ```bash
+    archon workflow run "Review my latest PR"
+    archon workflow run "Refactor the database layer safely"
+    archon workflow run "Add dark mode to the settings page"
+    ```
+
+  </Step>
+</Steps>
+
+---
+
+## Verification checklist
+
+```bash
+# Show installed version
+archon version
+
+# Check setup health (Claude binary, auth, database, adapters)
+archon doctor
+
+# List available workflows (run from inside a git repo)
+archon workflow list
+```
+
+<Tip>
+  If you're running the full setup and want to verify the backend is healthy, run `curl http://localhost:3090/health`. You should see `{"status":"ok"}`.
+</Tip>
+
+---
+
+## Common first-run issues
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion title="'CLAUDE_BIN_PATH not set' error on quick install">
+    Compiled binaries can't auto-discover Claude Code. Set the path explicitly:
+
+    ```bash
+    export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
+    ```
+
+    Or add it to `~/.archon/config.yaml` under `assistants.claude.claudeBinaryPath`. See [AI Assistants](/getting-started/ai-assistants) for all install-layout paths.
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+
+  <Accordion title="'Not in a git repository' error">
+    Archon requires a `.git` folder to create worktrees. Navigate to your project root, or initialize git:
+
+    ```bash
+    git init && git add . && git commit -m "initial commit"
+    ```
+
+    To skip isolation for one run: `archon workflow run <name> --no-worktree "message"`.
+  </Accordion>
+
+  <Accordion title="'command not found: archon' after quick install">
+    The binary installs to `~/.local/bin/` which may not be on your PATH:
+
+    ```bash
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    ```
+  </Accordion>
+
+  <Accordion title="'command not found: bun' during full setup">
+    Install Bun and open a new terminal:
+
+    ```bash
+    curl -fsSL https://bun.sh/install | bash
+    # Open a new terminal, or:
+    source ~/.bashrc
+    ```
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+---
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+## What's next
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core concepts" icon="book-open" href="/getting-started/concepts">
+    Learn about workflows, DAG nodes, isolation, providers, and adapters.
+  </Card>
+  <Card title="AI assistants" icon="wand-magic-sparkles" href="/getting-started/ai-assistants">
+    Configure Claude Code, Codex, or Pi as your AI backend.
+  </Card>
+  <Card title="Authoring workflows" icon="pen-nib" href="/guides/authoring-workflows">
+    Write custom YAML workflows tailored to your project's needs.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/reference/cli">
+    Full reference for all `archon` commands and flags.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

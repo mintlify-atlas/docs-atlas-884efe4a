@@ -1,0 +1,324 @@
+---
+title: "Script Nodes: TypeScript and Python in Workflow DAGs"
+description: "Run TypeScript (bun) or Python (uv) as deterministic Archon workflow nodes. Covers inline vs named scripts, dep installation, timeout, and stdout capture as $nodeId.output."
+---
+
+Script nodes let you run TypeScript, JavaScript, or Python code as part of an Archon workflow DAG without invoking any AI. The script runs via the `bun` or `uv` runtime, `stdout` is captured as the node's output, and the result flows downstream as `$nodeId.output`. Use script nodes for deterministic work that needs a real programming language: parsing JSON, transforming data between AI nodes, calling typed HTTP clients, or computing values that a shell one-liner would mangle.
+
+If a plain shell command is sufficient, use a [`bash:` node](/guides/authoring-workflows#node-types) instead.
+
+## Quick start
+
+<Tabs>
+  <Tab title="Inline TypeScript (bun)">
+    ```yaml
+    nodes:
+      - id: parse
+        script: |
+          const data = { count: 42, label: "ok" };
+          console.log(JSON.stringify(data));
+        runtime: bun
+    ```
+  </Tab>
+  <Tab title="Inline Python (uv)">
+    ```yaml
+    nodes:
+      - id: compute
+        script: |
+          import json, statistics
+          values = [1, 2, 3, 4, 5]
+          print(json.dumps({ "mean": statistics.mean(values) }))
+        runtime: uv
+    ```
+  </Tab>
+  <Tab title="Named script from .archon/scripts/">
+    ```yaml
+    nodes:
+      - id: fetch-pages
+        script: fetch-github-pages   # resolves .archon/scripts/fetch-github-pages.ts
+        runtime: bun
+        timeout: 60000
+    ```
+
+    The file `.archon/scripts/fetch-github-pages.ts` is executed with `bun --no-env-file run <path>`.
+  </Tab>
+</Tabs>
+
+## How it works
+
+<Steps>
+  <Step title="Variable substitution">
+    `$ARGUMENTS`, `$WORKFLOW_ID`, `$ARTIFACTS_DIR`, `$BASE_BRANCH`, `$DOCS_DIR`, and upstream `$nodeId.output` references are substituted into the `script` text before execution.
+  </Step>
+  <Step title="Inline vs named detection">
+    If the `script` value contains a newline or any shell metacharacter, it's treated as **inline code**. Otherwise it's treated as a **named script** reference resolved from `.archon/scripts/` or `~/.archon/scripts/`.
+  </Step>
+  <Step title="Runtime dispatch">
+    - `runtime: bun` + inline → `bun --no-env-file -e '<code>'`
+    - `runtime: bun` + named  → `bun --no-env-file run <path>`
+    - `runtime: uv` + inline  → `uv run [--with dep ...] python -c '<code>'`
+    - `runtime: uv` + named   → `uv run [--with dep ...] <path>`
+  </Step>
+  <Step title="Output capture">
+    `stdout` (with trailing newline stripped) becomes `$nodeId.output`. `stderr` is logged as a warning but does not fail the node. A non-zero exit code fails the node—the error message surfaces `stderr` without echoing the script body.
+  </Step>
+</Steps>
+
+## YAML schema
+
+```yaml
+- id: node-name
+  script: <inline code OR named identifier>    # required, non-empty
+  runtime: bun | uv                             # required
+  deps: ["httpx", "pydantic>=2"]                # optional, uv only
+  timeout: 60000                                # optional ms, default 120000
+  depends_on: [upstream]                        # optional
+  when: "$upstream.output != ''"                # optional
+  trigger_rule: all_success                     # optional (default)
+  retry:                                        # optional
+    max_attempts: 3
+    on_error: transient
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `script` | string | Yes | Inline code, or the basename (no extension) of a file in `.archon/scripts/` or `~/.archon/scripts/` |
+| `runtime` | `'bun'` \| `'uv'` | Yes | Which runtime executes the script. Must match the file extension for named scripts |
+| `deps` | string[] | No | Python packages to install for this run. **uv only** — ignored with a warning for `bun` |
+| `timeout` | number (ms) | No | Hard kill after this many milliseconds. Default: `120000` (2 min) |
+
+Standard DAG fields (`id`, `depends_on`, `when`, `trigger_rule`, `retry`) all work. AI-specific fields (`model`, `provider`, `output_format`, `allowed_tools`, etc.) are accepted by the parser but emit a loader warning and are ignored at runtime—no AI is invoked.
+
+## Inline vs named scripts
+
+The executor decides from the `script` string itself. A value is treated as **inline code** if it contains a newline or any shell metacharacter; otherwise it's a **named script** lookup.
+
+**Metacharacters that trigger inline mode:** space, `;` `(` `)` `{` `}` `&` `|` `<` `>` `$` `` ` `` `"` `'`
+
+| Mode | Examples |
+|------|---------|
+| **Inline** | Multi-line blocks, any snippet with a space, `"const x = 1; console.log(x)"` |
+| **Named** | `fetch-pages`, `analyze_metrics`, `triage-fmt` — bare identifiers with no whitespace or shell syntax |
+
+### Named script resolution
+
+Named scripts are discovered from, in precedence order:
+
+1. `<repoRoot>/.archon/scripts/` — repo-local
+2. `~/.archon/scripts/` — home-scoped (shared across every repo)
+
+Each directory is walked one subfolder deep (e.g. `.archon/scripts/triage/foo.ts` resolves as `foo`). Deeper nesting is ignored. On a same-name collision the repo-local entry wins.
+
+### Extension ↔ runtime mapping
+
+| Extension | Runtime |
+|-----------|---------|
+| `.ts`, `.js` | `bun` |
+| `.py` | `uv` |
+
+The `runtime:` declared on the node must match the file's extension—the validator rejects `runtime: uv` pointing at a `.ts` file, and vice versa.
+
+## Dependencies (uv only)
+
+`deps` is a pass-through to `uv run --with <dep>`, which installs packages into a per-run ephemeral environment:
+
+```yaml
+- id: scrape
+  script: |
+    import httpx
+    r = httpx.get("https://api.github.com/repos/anthropics/anthropic-cookbook")
+    print(r.text)
+  runtime: uv
+  deps: ["httpx>=0.27"]
+```
+
+- Any PEP 508 specifier works: `pkg==1.2.3`, `pkg>=2,<3`
+- `bun` auto-installs imported packages on first run, so `deps` with `runtime: bun` emits a warning—remove the field or switch to `uv` for explicit dependency management
+- Each run is isolated; there is no persistent `requirements.txt` or lockfile
+
+## Output and data flow
+
+`stdout` (trimmed) becomes `$nodeId.output`. Print JSON if you want downstream nodes to access structured fields:
+
+```yaml
+- id: classify
+  script: |
+    const input = process.env.USER_MESSAGE ?? '';
+    const severity = input.includes('crash') ? 'high' : 'low';
+    console.log(JSON.stringify({ severity, length: input.length }));
+  runtime: bun
+
+- id: investigate
+  command: investigate-bug
+  depends_on: [classify]
+  when: "$classify.output.severity == 'high'"
+```
+
+## Variable substitution in scripts
+
+Variables are substituted into the `script` text as raw strings, without shell quoting—unlike `bash:` nodes, where `$nodeId.output` values are auto-quoted. Treat substituted values as untrusted input and parse them with language features.
+
+<Warning>
+The pattern `` String.raw`$nodeId.output` `` fails silently when the substituted value contains a backtick—common in AI-generated markdown, `output_format` payloads, or any output with inline code spans. The backtick terminates the template literal early, producing a cryptic `Expected ";"` parse error.
+
+**Use direct assignment instead:**
+
+```typescript
+// Safe — works for any valid JSON, including content with backticks
+const data = $fetch-issue.output;
+
+// Fragile — breaks if output contains a backtick
+const data = JSON.parse(String.raw`$fetch-issue.output`);  // DON'T
+```
+</Warning>
+
+For **named scripts**, variables are not passed automatically—read them from the environment (`process.env.USER_MESSAGE`, `os.environ['USER_MESSAGE']`) or accept via stdin. For **inline scripts**, substituted variables are literally embedded into the code string at execution time.
+
+## Environment and isolation
+
+Script subprocesses receive `process.env` merged with any codebase-scoped env vars configured via the Web UI (Settings → Projects → Env Vars) or the `env:` block in `.archon/config.yaml`—the same injection surface used by Claude, Codex, and bash nodes.
+
+**Target repo `.env` isolation:** The Bun subprocess is invoked with `--no-env-file`, so variables in the target repo's `.env` do **not** leak into the script. Archon-managed env (from `~/.archon/.env` and `<repo>/.archon/.env`) passes through normally. `uv`-launched Python subprocesses do not auto-load `.env` at all.
+
+<Note>
+User-controlled variables like `$USER_MESSAGE` and `$ARGUMENTS` are passed to `bash:` nodes as environment variables—not inline-substituted—to prevent shell injection. Script nodes receive these values the same way via `process.env`.
+</Note>
+
+## Validation
+
+`archon validate workflows <name>` checks script nodes for:
+
+- **Script file exists** — for named scripts, the basename must exist in `.archon/scripts/` or `~/.archon/scripts/` with a matching extension
+- **Runtime available on PATH** — `bun` or `uv` must be installed:
+  - Install bun: `curl -fsSL https://bun.sh/install | bash`
+  - Install uv: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **`deps` with `runtime: bun`** — warns that `deps` is a no-op under bun
+
+Runtime availability is cached per-process—the check runs `which bun` / `which uv` once and memoizes the result.
+
+## Patterns
+
+### Transform AI output between nodes
+
+Use a script node as a deterministic adapter between two AI nodes:
+
+```yaml
+- id: classify
+  prompt: "Classify these issues: $ARGUMENTS"
+  allowed_tools: []
+  output_format:
+    type: object
+    properties:
+      items:
+        type: array
+        items: { type: object }
+
+- id: filter-high
+  script: |
+    const upstream = $classify.output;
+    const data = typeof upstream === 'string' ? JSON.parse(upstream) : upstream;
+    const high = (data.items ?? []).filter(i => i.severity === 'high');
+    console.log(JSON.stringify(high));
+  runtime: bun
+  depends_on: [classify]
+
+- id: triage
+  command: triage-high-severity
+  depends_on: [filter-high]
+  when: "$filter-high.output != '[]'"
+```
+
+### Reusable helper in `~/.archon/scripts/`
+
+A triage formatter you want available in every repo lives at `~/.archon/scripts/triage-fmt.ts`:
+
+```typescript ~/.archon/scripts/triage-fmt.ts
+const raw = process.argv.slice(2).join(' ') || '{}';
+const data = JSON.parse(raw);
+const lines = data.issues?.map((i: { id: string; title: string }) =>
+  `- [${i.id}] ${i.title}`
+).join('\n') ?? '';
+console.log(lines || 'no issues');
+```
+
+Reference it by name from any repo's workflow:
+
+```yaml
+- id: format
+  script: triage-fmt
+  runtime: bun
+  depends_on: [gather]
+```
+
+### Python with scientific dependencies
+
+```yaml
+- id: analyze
+  script: |
+    import json, sys
+    import pandas as pd
+    data = json.loads(sys.argv[1]) if len(sys.argv) > 1 else []
+    df = pd.DataFrame(data)
+    print(df.describe().to_json())
+  runtime: uv
+  deps: ["pandas>=2.0"]
+  depends_on: [collect]
+```
+
+### Fetch GitHub data with typed client
+
+```yaml
+- id: fetch-pr-stats
+  script: |
+    import httpx
+    import json, os
+    token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    r = httpx.get(
+        "https://api.github.com/repos/owner/repo/pulls",
+        params={"state": "open", "per_page": 20},
+        headers=headers
+    )
+    prs = r.json()
+    summary = [{"number": p["number"], "title": p["title"]} for p in prs]
+    print(json.dumps(summary))
+  runtime: uv
+  deps: ["httpx>=0.27"]
+  timeout: 30000
+```
+
+## What does NOT work
+
+<AccordionGroup>
+  <Accordion title="AI-only features">
+    `hooks`, `mcp`, `skills`, `allowed_tools`, `denied_tools`, `agents`, `model`, `provider`, `output_format`, `effort`, `thinking`, `maxBudgetUsd`, `systemPrompt`, `fallbackModel`, `betas`, and `sandbox` are all ignored at runtime. The loader emits a warning listing the ignored fields.
+  </Accordion>
+  <Accordion title="Interactive prompts">
+    Scripts run headlessly. Any `stdin` read will see EOF immediately.
+  </Accordion>
+  <Accordion title="Other runtimes">
+    Only `bun` and `uv` are supported. Other runtime values are rejected at parse time.
+  </Accordion>
+  <Accordion title="Cooperative cancellation">
+    Script subprocesses are killed on workflow cancel, but there is no cooperative cancellation signal. Design scripts to complete quickly or fail fast. Use `timeout:` to cap execution time.
+  </Accordion>
+</AccordionGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Workflows" icon="git-branch" href="/guides/authoring-workflows">
+    Full workflow reference including bash nodes and all node types.
+  </Card>
+  <Card title="Global Workflows" icon="globe" href="/guides/global-workflows">
+    Place scripts in `~/.archon/scripts/` for use across every repo.
+  </Card>
+  <Card title="Variable Reference" icon="variable" href="/reference/variables">
+    Complete variable substitution rules including `$nodeId.output`.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    `archon validate workflows` to check script node configuration.
+  </Card>
+</CardGroup>

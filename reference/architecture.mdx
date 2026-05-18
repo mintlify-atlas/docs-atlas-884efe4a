@@ -1,0 +1,454 @@
+---
+title: "Archon System Architecture and Package Reference"
+description: "Archon's monorepo package structure, data flow, database schema, platform adapter pattern, AI provider interface, and workflow execution model explained."
+---
+
+Archon is a platform-agnostic AI coding assistant orchestrator built as a Bun + TypeScript monorepo. It connects messaging platforms (Web UI, Telegram, GitHub, Slack, Discord) to AI coding assistants (Claude Code, Codex) via a unified interface. This page explains the package structure, data flow, key interfaces, and the database schema.
+
+---
+
+## System overview
+
+```
+┌─────────────────────────────────────────────┐
+│  Platform Adapters (Web UI, Telegram,       │
+│         GitHub, Slack, Discord, CLI)        │
+│   • IPlatformAdapter interface              │
+│   • Web: SSE streaming + REST API           │
+│   • Others: Platform-specific messaging     │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│            Orchestrator                     │
+│   • Route slash commands → Command Handler  │
+│   • Route AI queries → Assistant Clients    │
+│   • Manage session lifecycle                │
+│   • Stream responses back to platforms      │
+│   • Emit workflow events to Web UI          │
+└──────────────┬──────────────────────────────┘
+               │
+       ┌───────┼────────┐
+       │       │        │
+       ▼       ▼        ▼
+┌───────────┐ ┌───────────────┐ ┌───────────────────┐
+│ Command   │ │ AI Agent      │ │ Isolation         │
+│ Handler   │ │ Providers     │ │ Providers         │
+│           │ │               │ │                   │
+│ (Slash    │ │ IAgent-       │ │ IIsolationProvider│
+│ commands) │ │ Provider      │ │ (worktree, etc.)  │
+└─────┬─────┘ └───────┬───────┘ └─────────┬─────────┘
+      │               │                   │
+      └───────────────┼───────────────────┘
+                      ▼
+┌─────────────────────────────────────────────┐
+│    SQLite (default) / PostgreSQL (8 tables) │
+│  • Codebases  • Conversations  • Sessions   │
+│  • Isolation Envs • Workflow Runs           │
+│  • Workflow Events • Messages               │
+│  • Codebase Env Vars                        │
+└─────────────────────────────────────────────┘
+```
+
+### Key design principles
+
+1. **Interface-driven** — both platform adapters and AI providers implement strict interfaces for swappability
+2. **Streaming-first** — all AI responses stream through async generators for real-time delivery
+3. **Session persistence** — AI sessions survive restarts via database storage
+4. **File-based commands** — users define commands in Git-versioned markdown files, not hardcoded logic
+5. **Platform-specific streaming** — each platform controls whether to stream or batch responses
+
+---
+
+## Monorepo package structure
+
+Archon uses Bun workspaces. Each package has a single responsibility and a narrow dependency surface.
+
+```
+packages/
+├── cli/            @archon/cli          Command-line interface
+├── server/         @archon/server       HTTP server, REST API, Web adapter
+├── core/           @archon/core         Shared business logic, DB, orchestrator
+├── workflows/      @archon/workflows    Workflow engine (loader, executor, DAG)
+├── providers/      @archon/providers    AI agent providers (Claude, Codex, Pi)
+├── adapters/       @archon/adapters     Platform adapters (Slack, Telegram, GitHub, Discord)
+├── isolation/      @archon/isolation    Worktree isolation types, providers, resolver
+├── git/            @archon/git          Git operations — no @archon/* deps
+├── paths/          @archon/paths        Path resolution, logger factory — zero @archon/* deps
+└── web/            @archon/web          React frontend (Vite + Tailwind + shadcn/ui)
+```
+
+### Package dependency graph
+
+```
+@archon/paths          (leaf — no @archon/* deps; pino + dotenv allowed)
+    │
+@archon/git            (depends on @archon/paths)
+    │
+@archon/isolation      (depends on @archon/git + @archon/paths)
+@archon/providers      (AI SDK deps; exports contract subpath @archon/providers/types)
+@archon/workflows      (depends on @archon/git + @archon/paths + @archon/providers/types)
+    │
+@archon/core           (depends on @archon/providers for AI)
+    │
+@archon/adapters       (depends on @archon/core)
+    │
+@archon/server         (depends on @archon/adapters; serves static @archon/web)
+    │
+@archon/cli            (depends on @archon/server for the serve command)
+```
+
+### Package responsibilities
+
+<AccordionGroup>
+  <Accordion title="@archon/paths — Path utilities and logger">
+    Zero dependencies on other `@archon/*` packages. Provides:
+    - Archon directory path utilities (`getArchonHome`, `getWebDistDir`, etc.)
+    - Pino logger factory (`createLogger`)
+    - CWD env stripper (`stripCwdEnv`, `strip-cwd-env-boot`)
+
+    **Location:** `packages/paths/src/`
+  </Accordion>
+
+  <Accordion title="@archon/git — Git operations">
+    Depends only on `@archon/paths`. Provides:
+    - Branch operations (checkout, merge detection)
+    - Repository operations (clone, sync, remote URL)
+    - Worktree operations (create, remove, list)
+    - `execFileAsync` and `mkdirAsync` wrappers
+
+    Never calls into `@archon/core` or higher.
+
+    **Location:** `packages/git/src/`
+  </Accordion>
+
+  <Accordion title="@archon/providers — AI agent providers">
+    Owns all AI SDK dependencies. Provides:
+    - `IAgentProvider` interface and `SendQueryOptions` contract (zero SDK deps, exported via `@archon/providers/types`)
+    - `ClaudeProvider` — `@anthropic-ai/claude-agent-sdk`
+    - `CodexProvider` — `@openai/codex-sdk`
+    - `PiProvider` (community, `builtIn: false`) — `@mariozechner/pi-coding-agent`, ~20 LLM backends
+
+    The contract subpath `@archon/providers/types` is the only part imported by `@archon/workflows` — it has zero SDK deps and zero runtime side effects.
+
+    **Location:** `packages/providers/src/`
+  </Accordion>
+
+  <Accordion title="@archon/isolation — Worktree isolation">
+    Depends on `@archon/git` and `@archon/paths`. Provides:
+    - `IIsolationProvider` interface
+    - `WorktreeProvider` — default implementation using git worktrees
+    - `IsolationResolver` — maps workflow requests to environments
+    - `classifyIsolationError` — maps git errors to user-friendly messages
+
+    **Location:** `packages/isolation/src/`
+  </Accordion>
+
+  <Accordion title="@archon/workflows — Workflow engine">
+    The pure execution engine. Depends only on `@archon/git`, `@archon/paths`, and `@archon/providers/types`. Database and AI are injected via `WorkflowDeps`. Provides:
+    - `parseWorkflow` — YAML parsing + Zod validation
+    - `discoverWorkflowsWithConfig` — filesystem discovery across all three scopes
+    - `executeWorkflow` — orchestration entry point
+    - DAG executor with concurrent node execution
+    - Variable substitution engine
+    - Bundled default workflows and commands
+
+    **Location:** `packages/workflows/src/`
+  </Accordion>
+
+  <Accordion title="@archon/core — Business logic">
+    Business logic, database, and orchestration. Depends on `@archon/providers` for AI. Provides:
+    - Database layer (SQLite/PostgreSQL adapter)
+    - Orchestrator (conversation management, session lifecycle)
+    - Command handler (slash commands)
+    - `createWorkflowStore()` — bridges core DB to `IWorkflowStore`
+
+    **Location:** `packages/core/src/`
+  </Accordion>
+
+  <Accordion title="@archon/adapters — Platform adapters">
+    Depends on `@archon/core`. Provides adapters for:
+    - **Slack** (`chat/slack/`) — Socket Mode polling
+    - **Telegram** (`chat/telegram/`) — Bot API polling
+    - **GitHub** (`forge/github/`) — Webhook + `gh` CLI
+    - **Discord** (`community/chat/discord/`) — discord.js WebSocket
+    - **GitLab** (`forge/gitlab/`) — community forge adapter
+
+    **Location:** `packages/adapters/src/`
+  </Accordion>
+
+  <Accordion title="@archon/server — HTTP server">
+    OpenAPIHono HTTP server with Zod + OpenAPI spec generation. Provides:
+    - REST API routes (`/api/`)
+    - SSE streaming (`/api/stream/`)
+    - Web platform adapter (SSE + message buffering)
+    - Static frontend serving
+
+    **Location:** `packages/server/src/`
+  </Accordion>
+
+  <Accordion title="@archon/web — React frontend">
+    Vite + Tailwind v4 + shadcn/ui + Zustand. API types are derived from the OpenAPI spec (`src/lib/api.generated.d.ts`) — never imported from `@archon/workflows`. Provides:
+    - Chat UI with SSE streaming
+    - Workflow Builder
+    - Command Center (run monitoring)
+    - Settings panels
+
+    **Location:** `packages/web/src/`
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Platform adapter pattern
+
+All platform adapters implement `IPlatformAdapter` (defined in `packages/core/src/types/index.ts`):
+
+```typescript
+export interface IPlatformAdapter {
+  sendMessage(conversationId: string, message: string, metadata?: MessageMetadata): Promise<void>;
+  ensureThread(originalConversationId: string, messageContext?: unknown): Promise<string>;
+  getStreamingMode(): 'stream' | 'batch';
+  getPlatformType(): string;
+  start(): Promise<void>;
+  stop(): void;
+  sendStructuredEvent?(conversationId: string, event: MessageChunk): Promise<void>;
+  emitRetract?(conversationId: string): Promise<void>;
+}
+```
+
+### Conversation ID formats
+
+| Platform | Conversation ID format |
+|----------|----------------------|
+| Web UI | User-provided string or auto-generated UUID |
+| Telegram | `chat_id` (e.g., `"123456789"`) |
+| GitHub | `owner/repo#issue_number` (e.g., `"user/repo#42"`) |
+| Slack | `thread_ts` or `channel_id+thread_ts` |
+| Discord | Channel ID |
+| CLI | `cli-{timestamp}-{random}` |
+
+### Streaming modes
+
+Each platform supports **stream** mode (real-time chunks) and **batch** mode (accumulated final message).
+
+| Platform | Default |
+|----------|---------|
+| Telegram | `stream` |
+| Slack | `batch` |
+| Discord | `batch` |
+| GitHub | `batch` |
+| Web UI | SSE streaming (always real-time) |
+
+### Authorization pattern
+
+Auth checks happen **inside** adapters — not in the orchestrator. Each adapter reads its allowlist from an environment variable (e.g., `TELEGRAM_ALLOWED_USER_IDS`) in the constructor and checks authorization before invoking the `onMessage` callback. Unauthorized requests are silently rejected and logged with masked user IDs.
+
+---
+
+## AI provider pattern
+
+All AI providers implement `IAgentProvider` (defined in `packages/providers/src/types.ts`):
+
+```typescript
+export interface IAgentProvider {
+  sendQuery(
+    prompt: string,
+    cwd: string,
+    resumeSessionId?: string,
+    options?: SendQueryOptions
+  ): AsyncGenerator<MessageChunk>;
+
+  getType(): string;
+  getCapabilities(): ProviderCapabilities;
+}
+```
+
+### MessageChunk discriminated union
+
+```typescript
+export type MessageChunk =
+  | { type: 'assistant'; content: string }
+  | { type: 'system'; content: string }
+  | { type: 'thinking'; content: string }
+  | { type: 'result'; sessionId?: string; tokens?: TokenUsage; cost?: number; ... }
+  | { type: 'rate_limit'; rateLimitInfo: Record<string, unknown> }
+  | { type: 'tool'; toolName: string; toolInput?: Record<string, unknown>; toolCallId?: string }
+  | { type: 'tool_result'; toolName: string; toolOutput: string; toolCallId?: string }
+  | { type: 'workflow_dispatch'; workerConversationId: string; workflowName: string }
+```
+
+### Built-in providers
+
+| Provider | SDK | `builtIn` |
+|----------|-----|-----------|
+| `claude` | `@anthropic-ai/claude-agent-sdk` | `true` |
+| `codex` | `@openai/codex-sdk` | `true` |
+| `pi` | `@mariozechner/pi-coding-agent` | `false` (community) |
+
+### Provider resolution order
+
+Provider is resolved via an explicit chain: `node.provider ?? workflow.provider ?? config.assistant`. Model strings are **never** used to influence provider selection and are forwarded verbatim to the resolved SDK.
+
+---
+
+## Workflow execution model
+
+Workflows use a DAG (directed acyclic graph) execution model:
+
+1. **Discovery** — `discoverWorkflowsWithConfig()` searches bundled defaults < global (`~/.archon/workflows/`) < project (`.archon/workflows/`), with project-level files overriding by filename.
+2. **Parsing** — `parseWorkflow()` validates YAML against the Zod schema. One broken file doesn't abort discovery.
+3. **Routing** — `resolveWorkflowName()` uses a 4-tier fallback: exact → case-insensitive → suffix → substring.
+4. **Execution** — `executeWorkflow()` builds the DAG, runs independent nodes concurrently, and resolves `$nodeId.output` references.
+5. **Variable substitution** — performed before each node executes: workflow vars → context vars → node output refs.
+6. **Isolation** — by default, each workflow run gets its own git worktree at `~/.archon/workspaces/<owner>/<repo>/worktrees/<branch>/`.
+
+### Node execution states
+
+```
+pending → running → completed
+                 → failed → (resume skips completed, retries failed)
+                 → skipped (when: condition false, or trigger_rule not met)
+pending → (paused at approval gate) → resumed → running
+```
+
+### Concurrent execution
+
+Nodes whose `depends_on` are all satisfied run concurrently in the same topological layer. A 3-node chain `A → B, C → D` runs `B` and `C` in parallel after `A` completes.
+
+---
+
+## Database schema
+
+Archon uses an 8-table schema with the `remote_agent_` prefix. SQLite is the default (zero setup); PostgreSQL is optional.
+
+```sql
+remote_agent_codebases
+├── id (UUID)
+├── name (VARCHAR)
+├── repository_url (VARCHAR)
+├── default_cwd (VARCHAR)
+├── ai_assistant_type (VARCHAR)       -- registered provider id
+└── commands (JSONB)                  -- {name: {path, description}}
+
+remote_agent_conversations
+├── id (UUID)
+├── platform_type (VARCHAR)           -- 'web' | 'telegram' | 'github' | 'slack' | 'discord'
+├── platform_conversation_id (VARCHAR)
+├── codebase_id (UUID → codebases.id)
+├── cwd (VARCHAR)
+├── ai_assistant_type (VARCHAR)       -- LOCKED at creation
+├── title (VARCHAR)
+├── deleted_at (TIMESTAMP)            -- soft-delete
+└── UNIQUE(platform_type, platform_conversation_id)
+
+remote_agent_sessions
+├── id (UUID)
+├── conversation_id (UUID → conversations.id)
+├── codebase_id (UUID → codebases.id)
+├── ai_assistant_type (VARCHAR)
+├── assistant_session_id (VARCHAR)    -- SDK session ID for resume
+├── active (BOOLEAN)                  -- only one active per conversation
+├── parent_session_id (UUID → sessions.id)
+├── transition_reason (TEXT)          -- why this session was created
+└── metadata (JSONB)                  -- {lastCommand: "plan-feature", ...}
+
+remote_agent_isolation_environments
+├── id (UUID)
+├── codebase_id (UUID → codebases.id)
+├── workflow_type (VARCHAR)
+├── workflow_id (VARCHAR)
+├── working_path (VARCHAR)
+├── branch_name (VARCHAR)
+├── status (VARCHAR)                  -- 'active' | 'destroyed'
+└── metadata (JSONB)
+
+remote_agent_workflow_runs
+├── id (UUID)
+├── conversation_id (UUID → conversations.id)
+├── codebase_id (UUID → codebases.id)
+├── workflow_name (VARCHAR)
+├── status (VARCHAR)                  -- 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+├── parent_conversation_id (UUID)
+└── metadata (JSONB)
+
+remote_agent_workflow_events
+├── id (UUID)
+├── workflow_run_id (UUID → workflow_runs.id)
+├── event_type (VARCHAR)
+├── step_index (INTEGER)
+├── step_name (VARCHAR)
+├── data (JSONB)
+└── created_at (TIMESTAMP)
+
+remote_agent_messages
+├── id (UUID)
+├── conversation_id (UUID → conversations.id)
+├── role (VARCHAR)                    -- 'user' | 'assistant'
+├── content (TEXT)
+├── metadata (JSONB)                  -- {toolCalls: [{name, input, duration}]}
+└── created_at (TIMESTAMP)
+
+remote_agent_codebase_env_vars
+├── id (UUID)
+├── codebase_id (UUID → codebases.id)
+├── key (VARCHAR)
+├── value (TEXT)                      -- encrypted at rest
+└── UNIQUE(codebase_id, key)
+```
+
+### Session lifecycle
+
+Sessions are **immutable** — transitions create new sessions linked via `parent_session_id`. The only transition that creates a new session immediately is `plan-to-execute`. All others deactivate the current session and create a new one on the next message.
+
+```
+1. First message       → transitionSession(conversationId, 'first-message', {...})
+2. AI responds         → updateSession(session.id, aiSessionId)
+3. Next message        → getActiveSession() returns existing; resume with aiSessionId
+4. User sends /reset   → deactivateSession(); next message creates fresh session
+5. plan → execute      → transitionSession(conversationId, 'plan-to-execute', {...})
+                         parent_session_id links back to planning session
+```
+
+---
+
+## Archon directory structure
+
+```
+~/.archon/
+├── workspaces/
+│   └── owner/repo/
+│       ├── source/          Cloned repo (or symlink to local path)
+│       ├── worktrees/       Git worktrees per branch
+│       ├── artifacts/
+│       │   └── runs/{id}/   Per-run artifacts ($ARTIFACTS_DIR)
+│       └── logs/            Workflow execution logs
+├── workflows/               Home-scoped workflows (global scope)
+├── commands/                Home-scoped commands (global scope)
+├── scripts/                 Home-scoped scripts (global scope)
+├── web-dist/<version>/      Cached web UI (archon serve, binary only)
+├── archon.db                SQLite database (default)
+└── config.yaml              Global configuration
+
+.archon/                     Repo-level (in any repository)
+├── commands/                Custom command files (.md)
+├── workflows/               Workflow definitions (.yaml)
+├── scripts/                 Named scripts (.ts for bun, .py for uv)
+├── state/                   Cross-run state (gitignored)
+└── config.yaml              Repo-specific configuration
+```
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/reference/api">
+    REST API endpoints for the server layer.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/reference/configuration">
+    All configuration options including package-level env vars.
+  </Card>
+  <Card title="Workflow Schema" icon="diagram-project" href="/reference/workflow-schema">
+    Complete YAML schema for workflow and node definitions.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    CLI commands including serve, skill install, and doctor.
+  </Card>
+</CardGroup>

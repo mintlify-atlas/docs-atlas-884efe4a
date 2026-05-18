@@ -1,0 +1,303 @@
+---
+title: "Approval Nodes: Human-in-the-Loop Workflow Gates"
+description: "Pause Archon workflow execution for human review. Configure approve/reject gates, capture reviewer comments, and trigger AI rework on rejection."
+---
+
+Approval nodes pause a running Archon workflow and wait for a human to approve or reject before continuing. They are the primary mechanism for inserting human review steps into otherwise automated pipelines—for example, reviewing a generated plan before committing to expensive implementation work, or reviewing proposed code changes before merging. This page covers the YAML schema, how to approve and reject from every platform, the `capture_response` option, and AI rework with `on_reject`.
+
+<Note>
+**Web UI users:** Add `interactive: true` at the workflow level. Without it, the workflow runs in a background worker and approval gate messages won't appear in your chat window.
+</Note>
+
+## Quick start
+
+```yaml .archon/workflows/plan-approve-implement.yaml
+name: plan-approve-implement
+description: Plan with human approval gate, then implement
+interactive: true   # Required for Web UI: approval messages appear in chat
+
+nodes:
+  - id: plan
+    prompt: |
+      Analyze the codebase and create a detailed implementation plan.
+      $USER_MESSAGE
+
+  - id: review-gate
+    approval:
+      message: "Review the plan above before proceeding with implementation."
+    depends_on: [plan]
+
+  - id: implement
+    command: implement
+    depends_on: [review-gate]
+```
+
+When execution reaches `review-gate`, the workflow pauses and sends a message to the user. On the Web UI, `interactive: true` is required for the message to appear in your chat.
+
+## How it works
+
+<Steps>
+  <Step title="Pause">
+    The executor sets the workflow run status to `paused` and stores the approval context (node ID and message) in the run's metadata.
+  </Step>
+  <Step title="Notify">
+    A message is sent to the user on whatever platform they're using (CLI, Slack, Telegram, GitHub, Web). The message includes the approval prompt and instructions for approving or rejecting.
+  </Step>
+  <Step title="Wait">
+    The workflow stays paused until the user takes action. Paused runs block the worktree path guard—no other workflow can start on the same path while a run is paused.
+  </Step>
+  <Step title="Approve">
+    The user approves. This writes a `node_completed` event and auto-resumes the workflow from the next node. Natural-language messages, the CLI, Web UI approve button, and `/workflow approve` all auto-resume.
+  </Step>
+  <Step title="Reject (without on_reject)">
+    The workflow is cancelled immediately.
+  </Step>
+  <Step title="Reject (with on_reject)">
+    The executor runs the `on_reject.prompt` via AI (with `$REJECTION_REASON` substituted), then re-pauses at the same gate. This repeats until the user approves or `max_attempts` is reached, at which point the workflow is cancelled.
+  </Step>
+</Steps>
+
+## YAML schema
+
+```yaml
+- id: gate-name
+  approval:
+    message: "Human-readable prompt shown to the user when the workflow pauses"
+    capture_response: true          # optional: store user's comment as $gate-name.output
+    on_reject:                      # optional: AI rework on rejection instead of cancel
+      prompt: "Fix based on: $REJECTION_REASON"
+      max_attempts: 3               # optional: default 3, range 1–10
+  depends_on: [upstream-node]       # optional
+  when: "$plan.output != ''"        # optional condition
+  trigger_rule: all_success         # optional (default)
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `approval.message` | string | Yes | Message shown to the user when the workflow pauses |
+| `approval.capture_response` | boolean | No | When `true`, the user's approval comment is stored as `$<node-id>.output` for downstream nodes. Default: `false` |
+| `approval.on_reject.prompt` | string | No | Prompt run via AI when the user rejects. `$REJECTION_REASON` is substituted with the reject reason. After running, the workflow re-pauses at the same gate |
+| `approval.on_reject.max_attempts` | integer | No | Max rejection-and-rework cycles before the workflow is cancelled. Range: 1–10. Default: 3 |
+
+<Info>
+Approval nodes do not support AI-specific fields (`model`, `provider`, `context`, `output_format`, `allowed_tools`, `denied_tools`, `hooks`, `mcp`, `skills`, `idle_timeout`) — they don't invoke an AI agent. Standard DAG fields (`id`, `depends_on`, `when`, `trigger_rule`, `retry`) work as expected. The `on_reject.prompt` runs as a separate AI node using the workflow's default provider.
+</Info>
+
+## Approving and rejecting
+
+### Natural language (recommended)
+
+Type your response in the same conversation. The system detects the paused workflow and treats your message as the approval response:
+
+```
+User: "Looks good, but add error handling for the edge cases"
+→ Auto-approves, resumes workflow
+  (user's message becomes $gate.output only if capture_response: true)
+```
+
+This works on all platforms: Web, Slack, Telegram, Discord, GitHub.
+
+To reject instead of approve via natural language, use the explicit `/workflow reject <run-id>` command.
+
+### CLI
+
+```bash
+# Approve — resumes the workflow immediately
+archon workflow approve <run-id>
+archon workflow approve <run-id> --comment "Looks good, proceed"
+
+# Reject — without on_reject: cancels workflow
+#         — with on_reject: records feedback, triggers AI rework, re-pauses
+archon workflow reject <run-id>
+archon workflow reject <run-id> --reason "Plan needs more test coverage"
+```
+
+### Slash commands (all platforms)
+
+```
+/workflow approve <run-id> looks good
+/workflow reject <run-id> needs changes
+```
+
+### Web UI
+
+Paused workflows show an amber pulsing badge on the dashboard. Click **Approve** or **Reject** on the workflow card. Both actions auto-resume from the paused gate.
+
+The **Reject** dialog includes an optional free-text reason field. The trimmed value is passed to the workflow as `$REJECTION_REASON`, available in the `on_reject.prompt`.
+
+<Warning>
+**Cross-platform caveat:** Auto-resume via the Web UI only applies when the run was originally dispatched from the Web UI. If you approve a Slack/Telegram/GitHub-dispatched run from the dashboard, the decision is recorded but the resume must happen in the originating platform.
+</Warning>
+
+### REST API
+
+```bash
+# Approve
+curl -X POST http://localhost:3090/api/workflows/runs/<run-id>/approve \
+  -H "Content-Type: application/json" \
+  -d '{"comment": "Approved"}'
+
+# Reject
+curl -X POST http://localhost:3090/api/workflows/runs/<run-id>/reject \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Needs revision"}'
+```
+
+## Capturing reviewer comments (`capture_response`)
+
+By default, the user's approval comment is **not** available downstream—`$gate.output` will be an empty string. Set `capture_response: true` to capture the comment:
+
+```yaml
+nodes:
+  - id: gate
+    approval:
+      message: "Any special instructions for implementation?"
+      capture_response: true    # Makes user's comment available as $gate.output
+    depends_on: [plan]
+
+  - id: implement
+    prompt: |
+      Implement the plan. User instructions: $gate.output
+    depends_on: [gate]
+```
+
+Without `capture_response: true`, downstream nodes should not reference `$gate.output`—it will be an empty string.
+
+## Rejection with AI rework (`on_reject`)
+
+When `on_reject` is configured, a rejection does not cancel the workflow. Instead, the executor runs an AI prompt with the rejection reason and re-pauses at the same gate:
+
+```yaml
+- id: review-gate
+  approval:
+    message: "Review the implementation plan."
+    capture_response: true
+    on_reject:
+      prompt: |
+        The reviewer rejected the plan with this feedback: $REJECTION_REASON
+
+        Revise the plan to address the feedback, then summarize the changes.
+      max_attempts: 3   # After 3 rejections, the workflow is cancelled
+  depends_on: [plan]
+```
+
+### Lifecycle with `on_reject`
+
+1. Workflow pauses at approval gate
+2. Reviewer rejects — `rejection_count` incremented, `rejection_reason` stored
+3. If `rejection_count < max_attempts`: `on_reject.prompt` runs via AI, workflow re-pauses
+4. If `rejection_count >= max_attempts`: workflow cancelled
+
+## Report generation example
+
+This pattern generates a report, then loops the gate until approved or `max_attempts` exhausted:
+
+```yaml .archon/workflows/generate-report.yaml
+name: generate-report
+description: Generate a report with iterative reviewer feedback
+interactive: true
+
+nodes:
+  - id: generate
+    command: generate-report
+
+  - id: review-gate
+    approval:
+      message: "Review the report. Approve or request changes."
+      capture_response: true
+      on_reject:
+        prompt: |
+          The reviewer has requested changes: $REJECTION_REASON
+
+          Read the report at `$ARTIFACTS_DIR/report.md`.
+          Revise the specific sections the reviewer mentioned.
+          Write the updated report back to the same path.
+        max_attempts: 5
+    depends_on: [generate]
+
+  - id: publish
+    command: publish-report
+    depends_on: [review-gate]
+```
+
+## Multi-gate workflows
+
+Multiple approval nodes in a single workflow are fully supported. Each pauses the workflow independently:
+
+```yaml .archon/workflows/careful-refactor.yaml
+name: careful-refactor
+description: Refactor with two human approval gates
+interactive: true
+
+nodes:
+  - id: analyze
+    command: analyze-codebase
+
+  - id: plan-gate
+    approval:
+      message: "Review the refactor plan. Approve to proceed with implementation."
+      capture_response: true
+    depends_on: [analyze]
+
+  - id: implement
+    command: execute-refactor
+    depends_on: [plan-gate]
+
+  - id: diff-gate
+    approval:
+      message: "Review the git diff. Approve to create the PR."
+    depends_on: [implement]
+
+  - id: create-pr
+    command: create-pr
+    depends_on: [diff-gate]
+    context: fresh
+```
+
+## Edge cases
+
+<AccordionGroup>
+  <Accordion title="Approval node in a parallel layer">
+    Other nodes in the same topological layer complete normally. The workflow pauses at the layer boundary once the approval node is reached.
+  </Accordion>
+  <Accordion title="Server restart while paused">
+    The run persists in the database. The user can still approve or reject after restart—the workflow resumes from exactly where it left off.
+  </Accordion>
+  <Accordion title="Abandoning a paused run">
+    Use `archon workflow abandon <id>` or the **Abandon** button on the dashboard. This marks the run `cancelled` while preserving the completed-node history.
+  </Accordion>
+  <Accordion title="Multiple approval nodes in the same workflow">
+    Fully supported. Each pauses and resumes independently. The worktree path guard blocks other workflow starts while any approval node is paused.
+  </Accordion>
+</AccordionGroup>
+
+## Choosing: interactive loop vs approval with `on_reject`
+
+| | Interactive loop | Approval + `on_reject` |
+|---|---|---|
+| YAML | `loop.interactive: true` | `approval.on_reject: { prompt }` |
+| User input variable | `$LOOP_USER_INPUT` | `$REJECTION_REASON` |
+| How it works | Same prompt runs each iteration, user input injected | Specific `on_reject` prompt runs only on rejection |
+| Best for | **Conversational iteration** — explore, refine, review cycles | **Gate-then-fix** — approve to proceed, or reject to trigger a specific corrective action |
+| Example | PIV loop: explore → user feedback → explore again | Report generation: generate → user rejects → AI revises |
+
+See [Loop Nodes](/guides/loop-nodes) for the interactive loop pattern.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Workflows" icon="git-branch" href="/guides/authoring-workflows">
+    Full workflow reference including the human-in-the-loop pattern.
+  </Card>
+  <Card title="Loop Nodes" icon="refresh-cw" href="/guides/loop-nodes">
+    Interactive loops with `$LOOP_USER_INPUT` for conversational iteration.
+  </Card>
+  <Card title="Variable Reference" icon="variable" href="/reference/variables">
+    `$REJECTION_REASON`, `$LOOP_USER_INPUT`, and all other variables.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    `archon workflow approve` and `archon workflow reject` commands.
+  </Card>
+</CardGroup>

@@ -1,0 +1,268 @@
+---
+title: "Global Workflows: User-Level Commands and Scripts"
+description: "Place workflows, commands, and scripts in ~/.archon/ to share them across every project. Covers load priority, 1-level subfolders, dotfiles syncing, and path migration."
+---
+
+Archon supports user-level (global) workflows, commands, and scripts placed directly in `~/.archon/`—they are loaded automatically in every project without any configuration. This is distinct from project-level files in `.archon/` (which only apply to one repo) and from bundled defaults shipped with the Archon binary. This page covers the directory paths, load priority, subfolder support, use cases, dotfiles syncing, and how to migrate from the old path.
+
+## Paths
+
+```
+~/.archon/workflows/
+~/.archon/commands/
+~/.archon/scripts/
+```
+
+Or, if you have set `ARCHON_HOME`:
+
+```
+$ARCHON_HOME/workflows/
+$ARCHON_HOME/commands/
+$ARCHON_HOME/scripts/
+```
+
+Create the directories if they don't exist:
+
+```bash
+mkdir -p ~/.archon/workflows ~/.archon/commands ~/.archon/scripts
+```
+
+<Info>
+These directories are direct children of `~/.archon/`—the same level as `workspaces/`, `archon.db`, and `config.yaml`. Earlier Archon versions stored global workflows at `~/.archon/.archon/workflows/` (with an extra nested `.archon/`). See [Migrating from the old path](#migrating-from-the-old-path) if you have files there.
+</Info>
+
+## Load priority
+
+When Archon discovers workflows, commands, and scripts, it merges them in this order (higher overrides lower on filename collision):
+
+1. **Bundled defaults** (lowest) — `archon-*` workflows/commands embedded in the Archon binary
+2. **Global / home-scoped** — `~/.archon/workflows/`, `~/.archon/commands/`, `~/.archon/scripts/`
+3. **Repo-specific** (highest) — `<repoRoot>/.archon/workflows/`, `<repoRoot>/.archon/commands/`, `<repoRoot>/.archon/scripts/`
+
+A repo can override a global workflow by dropping a file with the same name in its own `.archon/workflows/`. Global workflows and commands carry the `source: 'global'` label in the Web UI node palette.
+
+## Subfolders (1 level deep)
+
+Each directory supports one level of subfolders for grouping—matching the `defaults/` convention:
+
+```
+~/.archon/workflows/
+├── my-review.yaml              # ✅ top-level file
+├── triage/
+│   └── weekly-cleanup.yaml    # ✅ resolvable as `weekly-cleanup`
+└── team/personal/too-deep.yaml # ❌ ignored — 2 levels deep
+```
+
+Resolution is by **filename without extension** for commands and scripts, and by **exact filename** for workflows—regardless of which subfolder the file lives in. Keep each name unique within `~/.archon/commands/` (or within `<repoRoot>/.archon/commands/`), across whatever subfolders you use.
+
+## CLI and Web support
+
+Both the CLI and the Web UI discover home-scoped content automatically—no flag or config option needed:
+
+```bash
+# Lists bundled + global + repo-specific workflows
+archon workflow list
+
+# Run a global workflow from any repo directory
+archon workflow run my-review
+```
+
+In the Web UI workflow builder, commands from `~/.archon/commands/` appear under a **Global (~/.archon/commands/)** section in the node palette, distinct from project and bundled entries.
+
+## Use cases
+
+### Personal code review workflow
+
+A workflow that runs your preferred review checklist on every project:
+
+```yaml ~/.archon/workflows/my-review.yaml
+name: my-review
+description: Personal code review with my standards
+model: sonnet
+
+nodes:
+  - id: review
+    prompt: |
+      Review the changes on this branch against main.
+      Check for: error handling, test coverage, naming conventions,
+      and unnecessary complexity. Be direct and specific.
+```
+
+### Code quality check
+
+```yaml ~/.archon/workflows/lint-check.yaml
+name: lint-check
+description: Check for common code quality issues across any project
+
+nodes:
+  - id: check
+    prompt: |
+      Scan this codebase for:
+      1. Functions longer than 50 lines
+      2. Deeply nested conditionals (>3 levels)
+      3. TODO/FIXME comments without issue references
+      Report findings as a prioritized list.
+```
+
+### Quick explain for unfamiliar codebases
+
+```yaml ~/.archon/workflows/explain.yaml
+name: explain
+description: Quick explanation of a codebase or module
+model: haiku
+
+nodes:
+  - id: explain
+    prompt: |
+      Give a concise explanation of this codebase.
+      Focus on: what it does, key entry points, and how the main
+      pieces connect. Keep it under 500 words.
+      Topic: $ARGUMENTS
+```
+
+### Personal command helpers
+
+Commands in `~/.archon/commands/` are available to every workflow on the machine. Useful for prompts you reuse across projects:
+
+```markdown ~/.archon/commands/review-checklist.md
+---
+description: Review uncommitted changes with my personal checklist
+---
+
+Review the uncommitted changes in the current worktree.
+Check for:
+- Error handling gaps
+- Missing tests
+- Surprising API shapes
+- Unnecessary cleverness
+
+Be terse. Report findings grouped by file.
+```
+
+Any workflow in any repo can then reference it:
+
+```yaml
+nodes:
+  - id: review
+    command: review-checklist
+```
+
+### Reusable script helper
+
+A triage formatter that you want available in every repo:
+
+```typescript ~/.archon/scripts/triage-fmt.ts
+const raw = process.argv.slice(2).join(' ') || '{}';
+const data = JSON.parse(raw);
+const lines = data.issues?.map((i: { id: string; title: string }) =>
+  `- [${i.id}] ${i.title}`
+).join('\n') ?? '';
+console.log(lines || 'no issues');
+```
+
+Reference it by name from any repo's workflow:
+
+```yaml
+- id: format
+  script: triage-fmt
+  runtime: bun
+  depends_on: [gather]
+```
+
+See [Script Nodes](/guides/script-nodes) for named script resolution rules.
+
+## Syncing with dotfiles
+
+If you manage configuration with a dotfiles repository, include your global Archon content:
+
+```
+dotfiles/
+└── archon/
+    ├── workflows/
+    │   ├── my-review.yaml
+    │   └── explain.yaml
+    ├── commands/
+    │   └── review-checklist.md
+    └── scripts/
+        └── triage-fmt.ts
+```
+
+Then symlink during dotfiles setup:
+
+```bash
+ln -sf ~/dotfiles/archon/workflows ~/.archon/workflows
+ln -sf ~/dotfiles/archon/commands  ~/.archon/commands
+ln -sf ~/dotfiles/archon/scripts   ~/.archon/scripts
+```
+
+Or copy as part of your dotfiles install script:
+
+```bash
+mkdir -p ~/.archon/workflows ~/.archon/commands ~/.archon/scripts
+cp ~/dotfiles/archon/workflows/*.yaml ~/.archon/workflows/
+cp ~/dotfiles/archon/commands/*.md    ~/.archon/commands/
+cp ~/dotfiles/archon/scripts/*.ts     ~/.archon/scripts/
+```
+
+Your personal workflows, commands, and scripts travel with you across machines.
+
+## Migrating from the old path
+
+Pre-refactor versions of Archon stored global workflows at `~/.archon/.archon/workflows/` (with a doubly-nested `.archon/`). That path is no longer read.
+
+If you have workflows at the old location, Archon emits a one-time deprecation warning on first use with the exact migration command:
+
+```bash
+mv ~/.archon/.archon/workflows ~/.archon/workflows && rmdir ~/.archon/.archon
+```
+
+Run it once. The warning stops on subsequent invocations. There was no prior home-scoped commands location—`~/.archon/commands/` is new capability with nothing to migrate.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Workflow not appearing in list">
+    1. **Check the path** — The directory must be exactly `~/.archon/workflows/` (a direct child of `~/.archon/`, not the old double-nested `~/.archon/.archon/workflows/`):
+
+       ```bash
+       ls ~/.archon/workflows/
+       ```
+
+    2. **Check file extension** — Workflow files must end in `.yaml` or `.yml`.
+
+    3. **Check YAML validity** — A syntax error causes the workflow to appear in the errors list rather than the workflow list:
+
+       ```bash
+       archon validate workflows my-workflow
+       ```
+
+    4. **Check for name conflicts** — If a repo-specific workflow has the same filename, it overrides the global one. The global version won't appear when you're in that repo.
+
+    5. **Check `ARCHON_HOME`** — If you've set `ARCHON_HOME` to a custom path, global workflows must be at `$ARCHON_HOME/workflows/`, not `~/.archon/workflows/`.
+  </Accordion>
+  <Accordion title="Command not found by workflow">
+    1. Verify the file exists at `~/.archon/commands/<name>.md`
+    2. Check for name conflicts with repo-local commands — repo wins by filename
+    3. Run `archon validate commands my-command` to check for load errors
+  </Accordion>
+  <Accordion title="Script not resolving">
+    Scripts are resolved by basename without extension. Ensure the file exists at `~/.archon/scripts/<name>.ts` (for bun) or `~/.archon/scripts/<name>.py` (for uv) and that the `runtime:` on the node matches the file extension.
+  </Accordion>
+</AccordionGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Workflows" icon="git-branch" href="/guides/authoring-workflows">
+    Full workflow YAML reference including file discovery rules.
+  </Card>
+  <Card title="Authoring Commands" icon="file-text" href="/guides/authoring-commands">
+    Write reusable markdown command files.
+  </Card>
+  <Card title="Script Nodes" icon="code" href="/guides/script-nodes">
+    Named scripts in `.archon/scripts/` and `~/.archon/scripts/`.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    `archon workflow list` and `archon validate` commands.
+  </Card>
+</CardGroup>

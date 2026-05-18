@@ -1,0 +1,381 @@
+---
+title: "AI Assistants: Claude, Codex, and Pi Configuration"
+description: "Set up Claude Code, OpenAI Codex, or Pi (20+ LLM backends) as Archon AI assistants — authentication, binary paths, and per-project config options."
+keywords: ["claude code", "codex", "pi provider", "ai assistant", "archon config", "llm"]
+---
+
+Archon supports three AI assistant providers: Claude Code (Anthropic), Codex (OpenAI), and Pi — a community provider that gives you access to 20+ LLM backends through a single `provider/model` reference format. You must configure at least one. All three can be mixed within a single workflow: set a default at the project level and override per node.
+
+<Tabs>
+  <Tab title="Claude Code">
+
+    Claude Code is the recommended default for Claude Pro/Max subscribers. Archon does not bundle Claude Code — you install it separately, then point Archon at the executable.
+
+    ## Install Claude Code
+
+    Anthropic's native installer is the primary recommended path:
+
+    <Tabs>
+      <Tab title="macOS / Linux / WSL">
+        ```bash
+        curl -fsSL https://claude.ai/install.sh | bash
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        irm https://claude.ai/install.ps1 | iex
+        ```
+      </Tab>
+      <Tab title="Alternatives">
+        ```bash
+        # macOS via Homebrew
+        brew install --cask claude-code
+
+        # Any platform via npm
+        npm install -g @anthropic-ai/claude-code
+
+        # Windows via winget
+        winget install Anthropic.ClaudeCode
+        ```
+      </Tab>
+    </Tabs>
+
+    ## Authentication
+
+    Claude Code supports three authentication modes. Set the mode via `CLAUDE_USE_GLOBAL_AUTH` in your `.env` or `~/.archon/.env`:
+
+    <Tabs>
+      <Tab title="Global auth (recommended)">
+        Uses credentials from `claude /login` — simplest option for Claude Pro/Max subscribers.
+
+        ```ini ~/.archon/.env
+        CLAUDE_USE_GLOBAL_AUTH=true
+        ```
+
+        If you haven't authenticated yet:
+
+        ```bash
+        claude /login
+        ```
+
+        Follow the browser flow. Credentials are stored globally and reused by Archon automatically.
+      </Tab>
+      <Tab title="OAuth token">
+        Generate a token via the Claude Code CLI:
+
+        ```bash
+        claude setup-token
+        # Copy the token starting with sk-ant-oat01-...
+        ```
+
+        ```ini ~/.archon/.env
+        CLAUDE_USE_GLOBAL_AUTH=false
+        CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+        ```
+      </Tab>
+      <Tab title="API key">
+        Pay-per-use via the Anthropic API.
+
+        1. Visit [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+        2. Create a new key (starts with `sk-ant-`)
+
+        ```ini ~/.archon/.env
+        CLAUDE_USE_GLOBAL_AUTH=false
+        CLAUDE_API_KEY=sk-ant-xxxxx
+        ```
+      </Tab>
+    </Tabs>
+
+    ## Binary path configuration (compiled binaries only)
+
+    Source installs (`bun run`) auto-resolve Claude Code via `node_modules`. Compiled Archon binaries (quick install, Homebrew, Docker) cannot auto-discover it — supply the path via either:
+
+    **Environment variable** (highest precedence):
+
+    ```bash
+    export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
+    ```
+
+    **Config file** (`~/.archon/config.yaml` or a repo-local `.archon/config.yaml`):
+
+    ```yaml ~/.archon/config.yaml
+    assistants:
+      claude:
+        claudeBinaryPath: /absolute/path/to/claude
+    ```
+
+    If neither is set in a compiled binary, Archon throws with install instructions on the first Claude query.
+
+    | Install method | Typical path |
+    |---|---|
+    | Native curl/PowerShell installer | `~/.local/bin/claude` (macOS/Linux) or `%USERPROFILE%\.local\bin\claude.exe` (Windows) |
+    | Homebrew cask | `$(brew --prefix)/bin/claude` |
+    | npm global install | `$(npm root -g)/@anthropic-ai/claude-code/cli.js` |
+    | Docker image | Pre-set — no action required |
+
+    If in doubt: `which claude` (macOS/Linux) or `where claude` (Windows).
+
+    ## Claude configuration options
+
+    Set Claude behavior in `.archon/config.yaml`:
+
+    ```yaml .archon/config.yaml
+    assistants:
+      claude:
+        model: sonnet           # 'sonnet', 'opus', 'haiku', 'claude-*', or 'inherit'
+        settingSources:
+          - project             # Load <cwd>/.claude/ (default)
+          - user                # Also load ~/.claude/ (default)
+        # claudeBinaryPath: /absolute/path/to/claude  # compiled binaries only
+    ```
+
+    The `settingSources` option controls which `CLAUDE.md`, skills, commands, and agent files the Claude Code SDK loads. Omit `user` to restrict a workflow to project-only resources (useful in CI or shared environments).
+
+    **Set as default assistant:**
+
+    ```ini ~/.archon/.env
+    DEFAULT_AI_ASSISTANT=claude
+    ```
+
+  </Tab>
+  <Tab title="Codex">
+
+    Archon does not bundle the Codex CLI. Install it, then authenticate.
+
+    ## Install the Codex CLI
+
+    ```bash
+    # Any platform (primary method — requires Node.js 18+)
+    npm install -g @openai/codex
+
+    # macOS alternative (no Node.js required)
+    brew install codex
+    ```
+
+    Native prebuilt binaries are also published on the [Codex releases page](https://github.com/openai/codex/releases). Drop one at `~/.archon/vendor/codex/codex` (or `codex.exe` on Windows) and Archon finds it automatically in compiled binary mode.
+
+    <Note>
+      On Windows, `npm install` works but is experimental. OpenAI recommends WSL2 for the best experience.
+    </Note>
+
+    ## Authenticate
+
+    ```bash
+    codex login
+    # Follow the browser authentication flow
+    ```
+
+    Then copy the tokens from the auth file:
+
+    ```bash
+    # macOS / Linux
+    cat ~/.codex/auth.json
+
+    # Windows
+    type %USERPROFILE%\.codex\auth.json
+    ```
+
+    Set all four values in your `.env`:
+
+    ```ini ~/.archon/.env
+    CODEX_ID_TOKEN=eyJhbGc...
+    CODEX_ACCESS_TOKEN=eyJhbGc...
+    CODEX_REFRESH_TOKEN=rt_...
+    CODEX_ACCOUNT_ID=6a6a7ba6-...
+    ```
+
+    ## Binary path configuration (compiled binaries only)
+
+    In compiled Archon binaries, if `codex` is not on the default PATH:
+
+    ```ini ~/.archon/.env
+    CODEX_BIN_PATH=/absolute/path/to/codex
+    ```
+
+    Or in `~/.archon/config.yaml`:
+
+    ```yaml ~/.archon/config.yaml
+    assistants:
+      codex:
+        codexBinaryPath: /absolute/path/to/codex
+    ```
+
+    ## Codex configuration options
+
+    ```yaml .archon/config.yaml
+    assistants:
+      codex:
+        model: gpt-5.3-codex
+        modelReasoningEffort: medium   # 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+        webSearchMode: live            # 'disabled' | 'cached' | 'live'
+        additionalDirectories:
+          - /absolute/path/to/other/repo
+    ```
+
+    **Set as default assistant:**
+
+    ```ini ~/.archon/.env
+    DEFAULT_AI_ASSISTANT=codex
+    ```
+
+  </Tab>
+  <Tab title="Pi (community)">
+
+    Pi is a community-maintained coding agent harness that Archon integrates as its first community provider. It gives you access to 20+ LLM backends — Anthropic, OpenAI, Google (Gemini + Vertex), Groq, Mistral, Cerebras, xAI, OpenRouter, Hugging Face, and local inference engines — through a single `provider: pi` entry and a `<pi-provider-id>/<model-id>` model reference format.
+
+    <Info>
+      Pi is included as a dependency of `@archon/providers` — no separate install is needed. It's available immediately.
+    </Info>
+
+    ## Quick setup via wizard
+
+    Run `archon setup` and select **Pi (community)** in the AI assistant multiselect. The wizard prompts for your preferred backend and API key, writes the key to `~/.archon/.env`, and writes the model reference to `~/.archon/config.yaml` automatically.
+
+    ## Authenticate
+
+    Pi reads credentials from two sources — env vars take priority:
+
+    **OAuth subscriptions** (run `pi /login` locally for these):
+    - Anthropic Claude Pro/Max
+    - OpenAI ChatGPT Plus/Pro
+    - GitHub Copilot
+    - Google Gemini CLI
+
+    **API keys via environment variables:**
+
+    ```ini ~/.archon/.env
+    ANTHROPIC_API_KEY=sk-ant-...      # Pi provider id: anthropic
+    OPENAI_API_KEY=sk-...             # Pi provider id: openai
+    GEMINI_API_KEY=...                # Pi provider id: google
+    GROQ_API_KEY=...                  # Pi provider id: groq
+    MISTRAL_API_KEY=...               # Pi provider id: mistral
+    CEREBRAS_API_KEY=...              # Pi provider id: cerebras
+    XAI_API_KEY=...                   # Pi provider id: xai
+    OPENROUTER_API_KEY=...            # Pi provider id: openrouter
+    HUGGINGFACE_API_KEY=...           # Pi provider id: huggingface
+    ```
+
+    ## Model reference format
+
+    Pi models use a `<pi-provider-id>/<model-id>` format in `.archon/config.yaml`:
+
+    ```yaml ~/.archon/config.yaml
+    assistants:
+      pi:
+        model: anthropic/claude-haiku-4-5
+
+        # Other examples:
+        # model: google/gemini-2.5-pro
+        # model: groq/llama-3.3-70b-versatile
+        # model: openrouter/qwen/qwen3-coder
+        # model: openai/gpt-4o
+        # model: xai/grok-3
+        # model: lm-studio/qwen2.5-coder-14b  # local inference
+```
+
+    ## Local and custom providers
+
+    LM Studio, ollama, llamacpp, and custom OpenAI-compatible endpoints work without Archon-side configuration. Register them in `~/.pi/agent/models.json` per Pi's docs, then reference them as `<pi-provider-id>/<model-id>`:
+
+    ```yaml .archon/config.yaml
+    assistants:
+      pi:
+        model: lm-studio/qwen2.5-coder-14b
+    ```
+
+    ## Using Pi in workflows
+
+    Set `provider: pi` at the workflow level or per node:
+
+    ```yaml .archon/workflows/my-workflow.yaml
+    name: my-workflow
+    provider: pi
+    model: anthropic/claude-haiku-4-5
+
+    nodes:
+      - id: fast-node
+        provider: pi
+        model: groq/llama-3.3-70b-versatile   # per-node override
+        prompt: "Summarize the changes in this diff"
+        effort: low
+        allowed_tools: [read, grep]
+
+      - id: careful-node
+        depends_on: [fast-node]
+        provider: pi
+        model: anthropic/claude-opus-4-5
+        prompt: "Review the summary and identify any risks"
+        effort: high
+    ```
+
+    ## Extensions
+
+    Pi's extension ecosystem lets community packages hook into the agent's lifecycle. Archon enables extensions by default. To opt out:
+
+    ```yaml .archon/config.yaml
+    assistants:
+      pi:
+        enableExtensions: false
+    ```
+
+    **Example — plannotator (human-in-the-loop plan review):**
+
+    ```bash
+    # One-time install
+    pi install npm:@plannotator/pi-extension
+    ```
+
+    ```yaml .archon/config.yaml
+    assistants:
+      pi:
+        model: anthropic/claude-haiku-4-5
+        extensionFlags:
+          plan: true
+        env:
+          PLANNOTATOR_REMOTE: "1"
+    ```
+
+    ```yaml .archon/workflows/my-piv.yaml
+    name: my-piv
+    provider: pi
+    interactive: true   # required for approval-gate extensions on the web UI
+    ```
+
+    ## Pi capabilities
+
+    | Feature | Supported |
+    |---|---|
+    | Session resume | Yes |
+    | Tool restrictions (`allowed_tools` / `denied_tools`) | Yes |
+    | Thinking level (`effort`) | Yes |
+    | Skills | Yes |
+    | Extensions | Yes (on by default) |
+    | System prompt override | Yes |
+    | Structured output (`output_format`) | Best-effort (prompt-based, not SDK-enforced) |
+    | MCP servers | No — Pi rejects MCP by design |
+    | Claude-SDK hooks | No — Claude-specific |
+    | Inline sub-agents (`agents:`) | No — Claude-only |
+
+    Unsupported YAML fields produce a visible warning when the workflow runs, so you always know what was ignored.
+
+  </Tab>
+</Tabs>
+
+---
+
+## How assistant selection works
+
+- The default assistant is set via `DEFAULT_AI_ASSISTANT` in your `.env`, or via `assistant:` in `.archon/config.yaml`
+- Once a conversation starts, the assistant type is locked for that conversation
+- `DEFAULT_AI_ASSISTANT` applies only to new conversations without codebase context
+- Workflows can override the assistant at the workflow level or per node using `provider:` and `model:` fields
+- Configuration priority: workflow-level options > config file defaults > SDK defaults
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of all configuration options including all assistant fields.
+  </Card>
+  <Card title="Authoring workflows" icon="pen-nib" href="/guides/authoring-workflows">
+    Learn how to set provider and model overrides inside workflow YAML.
+  </Card>
+</CardGroup>

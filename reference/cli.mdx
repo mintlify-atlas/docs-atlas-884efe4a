@@ -1,0 +1,513 @@
+---
+title: "Archon CLI Complete Command Reference"
+description: "Every Archon CLI command, subcommand, and flag documented with real usage examples — workflow, isolation, serve, setup, doctor, and more."
+---
+
+The Archon CLI (`archon`) is your primary interface for running AI-powered workflows, managing isolated worktrees, and controlling the Archon server from a terminal. This page covers every command and subcommand available, including all flags, defaults, and real terminal examples.
+
+<Note>
+Most workflow and isolation commands require a git repository. Running from a subdirectory (e.g., `/repo/packages/cli`) automatically resolves to the repo root. Commands like `version`, `help`, `chat`, `setup`, `serve`, and `doctor` work from any directory.
+</Note>
+
+## Prerequisites
+
+<Steps>
+  <Step title="Clone and install">
+    ```bash
+    git clone https://github.com/coleam00/Archon
+    cd Archon
+    bun install
+    ```
+  </Step>
+  <Step title="Link the CLI globally (recommended)">
+    ```bash
+    cd packages/cli
+    bun link
+    ```
+    This creates an `archon` command available system-wide. Without this step, use `bun run cli` from the repo directory instead.
+  </Step>
+  <Step title="Authenticate with Claude">
+    ```bash
+    claude /login
+    ```
+  </Step>
+</Steps>
+
+## Quick start
+
+```bash
+# List available workflows
+archon workflow list --cwd /path/to/repo
+
+# Run a workflow (auto-creates an isolated worktree)
+archon workflow run assist --cwd /path/to/repo "Explain the authentication flow"
+
+# Explicit branch name for the worktree
+archon workflow run plan --cwd /path/to/repo --branch feature-auth "Add OAuth support"
+
+# Skip isolation — run directly in live checkout
+archon workflow run assist --cwd /path/to/repo --no-worktree "Quick question"
+```
+
+---
+
+## Workflow commands
+
+### `workflow list`
+
+List all workflows discoverable from the target directory. Searches `.archon/workflows/` (project), `~/.archon/workflows/` (global), and bundled defaults.
+
+```bash
+archon workflow list --cwd /path/to/repo
+
+# Machine-readable JSON output
+archon workflow list --cwd /path/to/repo --json
+```
+
+**JSON output shape:** `{ "workflows": [...], "errors": [...] }`. Optional workflow fields (`provider`, `model`, `modelReasoningEffort`, `webSearchMode`) are omitted when unset.
+
+| Flag | Effect |
+|------|--------|
+| `--cwd <path>` | Target directory to discover project workflows |
+| `--json` | Emit machine-readable JSON instead of formatted text |
+
+---
+
+### `workflow run <name> [message]`
+
+Run a workflow with an optional user message. Progress events (node start/complete/fail/skip, approval gates) are written to stderr.
+
+```bash
+# Basic usage
+archon workflow run assist --cwd /path/to/repo "What does this function do?"
+
+# Explicit branch
+archon workflow run plan --cwd /path/to/repo --branch feature-x "Add caching"
+
+# Branch from a specific source branch
+archon workflow run implement --cwd /path/to/repo --branch test-adapters --from feature/extract-adapters "Test adapter changes"
+
+# Skip isolation
+archon workflow run assist --cwd /path/to/repo --no-worktree "Quick question"
+```
+
+| Flag | Effect |
+|------|--------|
+| `--cwd <path>` | Target directory |
+| `--branch <name>` | Explicit branch name for the worktree |
+| `--from <branch>`, `--from-branch <branch>` | Override base branch (start-point for the worktree) |
+| `--no-worktree` | Run directly in the live checkout — mutually exclusive with `--branch` and `--from` |
+| `--resume` | Resume from the last failed run at the working path, skipping completed nodes |
+| `--quiet`, `-q` | Suppress all progress output to stderr |
+| `--verbose`, `-v` | Show tool-level events (tool name and duration) |
+
+**Default (no flags):** Creates a worktree with an auto-generated branch (`archon/task-<workflow>-<timestamp>`) and auto-registers the codebase if inside a git repo.
+
+**Name matching (4-tier fallback):**
+
+1. **Exact** — `archon-assist` matches `archon-assist`
+2. **Case-insensitive** — `Archon-Assist` matches `archon-assist`
+3. **Suffix** — `assist` matches `archon-assist`
+4. **Substring** — `smart` matches `archon-smart-pr-review`
+
+If multiple workflows match at the same tier, an error lists the candidates:
+
+```
+Ambiguous workflow 'review'. Did you mean:
+  - archon-review
+  - custom-review
+```
+
+---
+
+### `workflow status`
+
+Show all running workflow runs across all worktrees.
+
+```bash
+archon workflow status
+archon workflow status --json
+```
+
+---
+
+### `workflow resume <run-id>`
+
+Resume a failed workflow run, re-executing from the first incomplete node and skipping nodes that already completed.
+
+```bash
+archon workflow resume 550e8400-e29b-41d4-a716-446655440000
+```
+
+---
+
+### `workflow abandon <run-id>`
+
+Discard a non-terminal workflow run (marks it as `cancelled`). Releases the path lock immediately so a new workflow can start.
+
+```bash
+archon workflow abandon 550e8400-e29b-41d4-a716-446655440000
+```
+
+---
+
+### `workflow approve <run-id> [comment]`
+
+Approve a paused workflow run at an interactive approval gate. The optional comment is available inside the workflow via `$LOOP_USER_INPUT`.
+
+```bash
+archon workflow approve 550e8400-e29b-41d4-a716-446655440000
+archon workflow approve 550e8400-e29b-41d4-a716-446655440000 "Looks good, proceed"
+archon workflow approve 550e8400-e29b-41d4-a716-446655440000 --comment "Looks good, proceed"
+```
+
+---
+
+### `workflow reject <run-id> [--reason <text>]`
+
+Reject a paused workflow run at an approval gate. The optional reason is available inside the workflow via `$REJECTION_REASON`.
+
+```bash
+archon workflow reject 550e8400-e29b-41d4-a716-446655440000
+archon workflow reject 550e8400-e29b-41d4-a716-446655440000 --reason "Needs more tests"
+```
+
+---
+
+### `workflow cleanup [days]`
+
+Delete old terminal workflow run records from the database.
+
+```bash
+archon workflow cleanup        # Default: 7 days
+archon workflow cleanup 30     # Custom retention threshold
+```
+
+---
+
+### `workflow event emit`
+
+Emit a workflow event directly to the database. Used inside workflow loop prompts to record story-level lifecycle events.
+
+```bash
+archon workflow event emit --run-id <uuid> --type <event-type> [--data <json>]
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--run-id` | Yes | UUID of the workflow run |
+| `--type` | Yes | Event type (e.g., `node_completed`) |
+| `--data` | No | JSON string attached to the event. Invalid JSON prints a warning and is ignored. |
+
+Exit code: `0` on success, `1` when `--run-id` or `--type` is missing or invalid. Event persistence is best-effort — check server logs if events appear missing.
+
+---
+
+### `workflow search [query]`
+
+Search the Archon workflow marketplace for community-contributed workflows.
+
+```bash
+archon workflow search              # Browse all marketplace workflows
+archon workflow search "code review"  # Filter by query
+```
+
+---
+
+### `workflow install <slug>`
+
+Install a workflow from the marketplace into `.archon/workflows/` of the current directory.
+
+```bash
+archon workflow install my-org/my-workflow
+```
+
+---
+
+## Isolation commands
+
+### `isolation list`
+
+Show all active worktree environments grouped by codebase, with branch name, workflow type, platform, and days since last activity.
+
+```bash
+archon isolation list
+```
+
+---
+
+### `isolation cleanup [days]`
+
+Remove stale environments. Merge detection uses three signals: git branch ancestry, patch equivalence (`git cherry`), and GitHub PR state (via `gh` CLI).
+
+```bash
+# Default: remove environments inactive for 7+ days
+archon isolation cleanup
+
+# Custom threshold
+archon isolation cleanup 14
+
+# Remove environments whose branches are merged into main (also deletes remote branches)
+archon isolation cleanup --merged
+
+# Also remove environments with closed (unmerged) PRs
+archon isolation cleanup --merged --include-closed
+```
+
+<Note>
+Branches with an **open** PR are always skipped. Branches with a **closed** PR are skipped by default — pass `--include-closed` to clean those up too. The `gh` CLI is optional; if absent, only git signals are used.
+</Note>
+
+---
+
+## Validate commands
+
+### `validate workflows [name]`
+
+Validate workflow YAML definitions and their referenced resources (command files, MCP configs, skill directories).
+
+```bash
+archon validate workflows                     # Validate all workflows
+archon validate workflows my-workflow         # Validate a single workflow
+archon validate workflows my-workflow --json  # Machine-readable JSON output
+```
+
+Checks: YAML syntax, DAG structure (cycles, dependency refs), command file existence, MCP config files, skill directories, and provider compatibility. Returns actionable error messages with "did you mean?" suggestions for typos.
+
+Exit code: `0` = all valid, `1` = errors found.
+
+---
+
+### `validate commands [name]`
+
+Validate command files (`.md`) in `.archon/commands/`.
+
+```bash
+archon validate commands                  # Validate all commands
+archon validate commands my-command       # Validate a single command
+```
+
+Exit code: `0` = all valid, `1` = errors found.
+
+---
+
+## Other commands
+
+### `chat <message>`
+
+Send a one-off message to the orchestrator for a quick AI interaction.
+
+```bash
+archon chat "What does the orchestrator do?"
+```
+
+---
+
+### `setup`
+
+Interactive setup wizard for credentials and configuration.
+
+```bash
+archon setup                      # Writes ~/.archon/.env (home scope, default)
+archon setup --scope project      # Writes <cwd>/.archon/.env instead
+archon setup --force              # Overwrite instead of merging (backup still written)
+archon setup --spawn              # Open in a new terminal window
+```
+
+| Flag | Effect |
+|------|--------|
+| `--scope home` | Write to `~/.archon/.env` (default) — applies to every project |
+| `--scope project` | Write to `<cwd>/.archon/.env` — overrides user scope for this repo |
+| `--force` | Overwrite the target file wholesale instead of merging. A timestamped backup is still written. |
+| `--spawn` | Open the setup wizard in a new terminal window |
+
+<Tip>
+`archon setup` never writes to `<cwd>/.env` — that file belongs to your project. The wizard always merges into the archon-owned file, preserving any keys you've added manually, and writes a timestamped backup before every rewrite (e.g., `~/.archon/.env.archon-backup-2026-04-20T09-28-11-000Z`). `archon doctor` runs automatically at the end of setup.
+</Tip>
+
+---
+
+### `doctor`
+
+Verify your Archon setup. Checks: Claude binary spawn, `gh` CLI auth, Pi auth (when configured), database reachability, workspace writability, bundled defaults, and adapter token pings (Slack/Telegram, best-effort).
+
+```bash
+archon doctor
+```
+
+Exit code `0` if all checks pass or are skipped; `1` if any critical check fails. Adapter pings degrade to `skip` on network errors.
+
+---
+
+### `serve`
+
+Start the web UI server. Downloads the pre-built web UI tarball from the matching GitHub release on first run, verifies the SHA-256 checksum, and extracts it. Subsequent runs use the cached copy.
+
+<Warning>
+`archon serve` is for compiled binary installs only. In development, use `bun run dev` instead.
+</Warning>
+
+```bash
+archon serve                    # Start web UI server (downloads on first run)
+archon serve --port 4000        # Override the default port
+archon serve --download-only    # Download and cache without starting the server
+```
+
+| Flag | Effect |
+|------|--------|
+| `--port <port>` | Override server port (default: `3090`, range: 1–65535) |
+| `--download-only` | Download and cache the web UI, then exit without starting the server |
+
+The cached web UI is stored at `~/.archon/web-dist/<version>/`. Each version is cached independently.
+
+---
+
+### `skill install [path]`
+
+Install the bundled Archon skill files into a project's `.claude/skills/archon/` directory. Always overwrites to ensure the latest version is installed.
+
+```bash
+archon skill install                    # Install into current directory
+archon skill install /path/to/project   # Install into a specific project
+```
+
+The Archon skill teaches Claude Code how to work with Archon workflows, commands, and project conventions. It is also installed automatically during `archon setup`.
+
+---
+
+### `continue <branch> [message]`
+
+Continue work on an existing worktree, auto-injecting prior run context (git diff, recent commits, artifact summaries) into the next workflow run.
+
+```bash
+archon continue feature-auth "Add the refresh token logic"
+archon continue feature-auth --workflow archon-assist "What's the status?"
+archon continue feature-auth --no-context "Start fresh on this branch"
+```
+
+| Flag | Effect |
+|------|--------|
+| `--workflow <name>` | Workflow to run (default: `archon-assist`) |
+| `--no-context` | Skip context injection — run the workflow without prior state |
+
+Resolves the branch name to its active worktree, finds the last run on that path, and builds a context preamble from live git state plus artifact summaries.
+
+---
+
+### `complete <branch> [branch2 ...]`
+
+Remove a branch's worktree, local branch, and remote branch, and mark its isolation environment as destroyed. Use this after a PR is merged.
+
+```bash
+archon complete feature-auth
+archon complete feature-auth --force   # Bypass uncommitted-changes check
+```
+
+| Flag | Effect |
+|------|--------|
+| `--force` | Skip uncommitted-changes guard |
+
+Accepts multiple branch names in one call.
+
+---
+
+### `version`
+
+Show version, build type, and database info.
+
+```bash
+archon version
+```
+
+---
+
+## Global options
+
+| Option | Effect |
+|--------|--------|
+| `--cwd <path>` | Override working directory (default: current directory) |
+| `--quiet`, `-q` | Reduce log verbosity to warnings and errors only |
+| `--verbose`, `-v` | Show debug-level output |
+| `--json` | Output machine-readable JSON (for `workflow list`, `workflow status`) |
+| `--help`, `-h` | Show help message |
+
+---
+
+## Working directory
+
+The CLI determines where to run based on:
+
+1. `--cwd` flag (if provided)
+2. Current directory (default)
+
+Running from a subdirectory automatically resolves to the git repository root. When using `--branch`, workflows run inside the worktree directory.
+
+<Info>
+Commands and workflows are loaded from the working directory at runtime. The CLI reads directly from disk and picks up uncommitted changes immediately. The server (Telegram/Slack/GitHub) reads from the workspace clone at `~/.archon/workspaces/` — that clone only syncs from the remote before worktree creation, so changes must be pushed to take effect.
+</Info>
+
+---
+
+## Database
+
+| Scenario | Storage |
+|----------|---------|
+| No `DATABASE_URL` set (default) | SQLite at `~/.archon/archon.db` — zero setup, auto-initialized |
+| `DATABASE_URL` set | PostgreSQL — for cloud or advanced deployments |
+
+Both modes work transparently. Most users never need to configure a database.
+
+---
+
+## Full examples
+
+```bash
+# One-off AI chat
+archon chat "How does error handling work in this codebase?"
+
+# Interactive setup wizard
+archon setup
+
+# Quick question (auto-isolated in archon/task-assist-<timestamp>)
+archon workflow run assist --cwd ~/projects/my-app "How does error handling work here?"
+
+# Quick question without isolation
+archon workflow run assist --cwd ~/projects/my-app --no-worktree "How does error handling work here?"
+
+# Plan a feature (auto-isolated)
+archon workflow run plan --cwd ~/projects/my-app "Add rate limiting to the API"
+
+# Implement with explicit branch name
+archon workflow run implement --cwd ~/projects/my-app --branch feature-rate-limit "Add rate limiting"
+
+# Branch from a specific source branch
+archon workflow run implement --cwd ~/projects/my-app --branch test-adapters --from feature/extract-adapters "Test adapter changes"
+
+# Approve or reject a paused workflow
+archon workflow approve <run-id> "Ship it"
+archon workflow reject <run-id> --reason "Missing test coverage"
+
+# Check worktrees after a work session
+archon isolation list
+
+# Clean up old worktrees
+archon isolation cleanup
+
+# Clean up merged branches (also removes remote branches)
+archon isolation cleanup --merged
+```
+
+<CardGroup cols={2}>
+  <Card title="Configuration Reference" icon="gear" href="/reference/configuration">
+    Learn how to configure Archon via YAML config and environment variables.
+  </Card>
+  <Card title="Variable Reference" icon="code" href="/reference/variables">
+    All substitution variables available in workflow prompts and bash scripts.
+  </Card>
+  <Card title="Workflow Schema" icon="diagram-project" href="/reference/workflow-schema">
+    Complete YAML schema reference for authoring workflows.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/reference/troubleshooting">
+    Common issues and fixes when running Archon locally or in Docker.
+  </Card>
+</CardGroup>

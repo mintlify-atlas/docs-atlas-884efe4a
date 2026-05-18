@@ -1,0 +1,112 @@
+{
+  "projectType": "framework",
+  "projectName": "Archon",
+  "projectDescription": "An open-source workflow engine and harness builder for AI coding agents that makes AI-driven development deterministic and repeatable through YAML-defined DAG workflows.",
+  "theme": "luma",
+  "primaryColor": "#e718ed",
+  "lightColor": "#27b7a3",
+  "darkColor": "#a54fd3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "getting-started/ai-assistants",
+              "getting-started/concepts"
+            ]
+          },
+          {
+            "group": "Authoring",
+            "pages": [
+              "guides/authoring-workflows",
+              "guides/authoring-commands",
+              "guides/loop-nodes",
+              "guides/approval-nodes",
+              "guides/script-nodes",
+              "guides/global-workflows"
+            ]
+          },
+          {
+            "group": "Platform Adapters",
+            "pages": [
+              "adapters/web",
+              "adapters/telegram",
+              "adapters/slack",
+              "adapters/github",
+              "adapters/discord"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/cloud",
+              "deployment/local"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/cli",
+              "reference/configuration",
+              "reference/variables",
+              "reference/workflow-schema",
+              "reference/api",
+              "reference/architecture",
+              "reference/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "YAML-defined DAG workflows with parallel execution and conditional branching",
+    "Git worktree isolation — every workflow run gets its own isolated environment",
+    "Multi-platform support: Web UI, CLI, Slack, Telegram, GitHub, Discord",
+    "Multi-provider AI: Claude Code, Codex, and Pi (20+ LLM backends)",
+    "Built-in workflow library: 19 bundled workflows for common dev tasks",
+    "Loop nodes for iterative AI execution until completion criteria are met",
+    "Human-in-the-loop approval gates for review and feedback",
+    "Bash, script (TypeScript/Python), and MCP server integration nodes",
+    "SQLite (default) or PostgreSQL database with zero-setup operation",
+    "Structured output enforcement and per-node tool restrictions"
+  ],
+  "publicApiSurface": [
+    "archon workflow list",
+    "archon workflow run <name> [message]",
+    "archon workflow status",
+    "archon workflow resume <run-id>",
+    "archon workflow abandon <run-id>",
+    "archon workflow approve <run-id> [comment]",
+    "archon workflow reject <run-id> [--reason]",
+    "archon workflow cleanup [days]",
+    "archon isolation list",
+    "archon isolation cleanup [days] [--merged] [--include-closed]",
+    "archon complete <branch>",
+    "archon validate workflows [name]",
+    "archon validate commands [name]",
+    "archon setup",
+    "archon doctor",
+    "archon serve [--port]",
+    "archon skill install [path]",
+    "archon version",
+    "GET /api/workflows",
+    "POST /api/workflows/runs/{runId}/resume",
+    "POST /api/workflows/runs/{runId}/abandon",
+    "GET /api/codebases",
+    "POST /api/codebases",
+    "GET /api/health",
+    "GET /api/openapi.json"
+  ]
+}

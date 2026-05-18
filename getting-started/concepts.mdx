@@ -1,0 +1,239 @@
+---
+title: "Core Concepts: Workflows, Nodes, Isolation, and Providers"
+description: "Understand Archon's building blocks — YAML DAG workflows, six node types, git worktree isolation, AI providers, platform adapters, and command files."
+keywords: ["archon concepts", "workflow dag", "node types", "git worktree", "providers", "adapters"]
+---
+
+Archon orchestrates AI coding agents through six interconnected concepts. This page explains each one conceptually with short examples — enough to make everything else click before you start writing your own workflows.
+
+## Workflows
+
+A **workflow** is a YAML file stored in `.archon/workflows/` that defines a multi-step coding task as a directed acyclic graph (DAG). Each workflow has a name, a description (used by the router to match it to your intent), and a set of nodes connected by `depends_on` edges.
+
+```yaml .archon/workflows/fix-issue.yaml
+name: fix-issue
+description: Investigate and fix a GitHub issue
+
+nodes:
+  - id: investigate
+    command: investigate-issue
+
+  - id: implement
+    command: implement-issue
+    depends_on: [investigate]
+    context: fresh
+```
+
+Nodes with no `depends_on` run immediately. Nodes in the same dependency layer run **in parallel** — so three independent review nodes fan out concurrently, then converge at a downstream node that depends on all three.
+
+Archon ships 17 bundled workflows. Run `archon workflow list` to see them, or browse `.archon/workflows/defaults/` for real YAML examples. To customize, copy a default into your repo's `.archon/workflows/` — files with the same name override the bundled version.
+
+<Tip>
+  You don't need to know workflow names to use them. Describe what you want and the router picks the best match. "Fix issue #42" routes to `archon-fix-github-issue`; "review this PR" routes to `archon-smart-pr-review`.
+</Tip>
+
+---
+
+## Nodes
+
+Nodes are the building blocks of workflows. Every node does exactly one thing, specified by its type. Six types are available:
+
+| Type | What it does |
+|---|---|
+| `command:` | Loads a markdown command file from `.archon/commands/` and sends it to an AI agent |
+| `prompt:` | Sends an inline prompt string directly to an AI agent |
+| `bash:` | Runs a shell command (no AI). stdout is captured as `$nodeId.output` |
+| `loop:` | Runs an AI prompt repeatedly until a completion signal (`ALL_TASKS_COMPLETE`, `APPROVED`, etc.) |
+| `approval:` | Pauses the workflow for human review — resumes only when you approve or reject |
+| `script:` | Runs an inline TypeScript or Python script (no AI). stdout captured as `$nodeId.output` |
+
+```yaml
+nodes:
+  # AI node with structured output — result is usable downstream
+  - id: classify
+    command: classify-issue
+    output_format:
+      type: object
+      properties:
+        type: { type: string, enum: [BUG, FEATURE] }
+      required: [type]
+
+  # Conditional AI node — only runs when classify says BUG
+  - id: fix-bug
+    command: fix-bug
+    depends_on: [classify]
+    when: "$classify.output.type == 'BUG'"
+
+  # Deterministic bash node — runs tests, no AI involved
+  - id: run-tests
+    depends_on: [fix-bug]
+    bash: "bun run test"
+
+  # Human gate — workflow pauses here until you approve
+  - id: approve
+    depends_on: [run-tests]
+    loop:
+      prompt: "Present the test results for review. Address feedback."
+      until: APPROVED
+      interactive: true
+```
+
+Nodes can override the AI provider or model per node with `provider:` and `model:` fields. You can also add `when:` conditions, control join behavior with `trigger_rule`, and pass structured data between nodes via `$nodeId.output`.
+
+---
+
+## Commands
+
+A **command** is a markdown file in `.archon/commands/` that serves as a reusable AI prompt template. When a workflow node specifies `command: investigate-issue`, Archon loads `.archon/commands/investigate-issue.md`, substitutes variables, and sends the result to the AI.
+
+```markdown .archon/commands/investigate-issue.md
+---
+description: Investigate a GitHub issue and produce a root-cause analysis
+argument-hint: <issue-number>
+---
+
+# Investigate Issue
+
+Investigate GitHub issue $ARGUMENTS:
+
+1. Read the issue description and comments
+2. Identify the relevant code paths
+3. Determine the root cause
+4. Write a summary to $ARTIFACTS_DIR/investigation.md
+```
+
+Commonly used variables in commands:
+
+| Variable | Resolves to |
+|---|---|
+| `$ARGUMENTS` | The user's input message |
+| `$ARTIFACTS_DIR` | Pre-created directory for workflow artifacts |
+| `$BASE_BRANCH` | Base branch (auto-detected or configured) |
+| `$DOCS_DIR` | Documentation directory (default: `docs/`) |
+| `$WORKFLOW_ID` | Unique ID for the current workflow run |
+| `$nodeId.output` | Captured stdout from a previous bash or script node |
+
+Archon ships bundled default commands for common operations. Repo-level commands in `.archon/commands/` override defaults with the same filename.
+
+See the [Variable Reference](/reference/variables) for the complete list.
+
+---
+
+## Isolation (git worktrees)
+
+Every workflow run gets its own **git worktree** by default — an isolated copy of your repository in a separate directory. This gives you three things:
+
+1. **Clean working branch.** Workflow changes happen in an isolated directory, never in your main checkout.
+2. **Parallel execution.** Multiple workflows run simultaneously without conflicting with each other.
+3. **Safe failure.** Failed runs don't leave your repo in a broken state. Clean up with `archon isolation cleanup`.
+
+```
+~/.archon/
+└── workspaces/
+    └── owner/repo/
+        ├── source/        # Clone or symlink to local path
+        ├── worktrees/
+        │   ├── fix/issue-42/     # One isolated copy per workflow run
+        │   └── feat/dark-mode/
+        ├── artifacts/     # Workflow artifacts (never committed)
+        └── logs/          # Workflow execution logs
+```
+
+To run a workflow on an isolated branch:
+
+```bash
+archon workflow run fix-github-issue --branch fix/issue-42 "Fix issue #42"
+```
+
+To skip isolation and run directly in your live checkout (useful for quick queries):
+
+```bash
+archon workflow run assist --no-worktree "What does the auth module do?"
+```
+
+When a branch's work is complete, clean up the worktree and both local and remote branches in one command:
+
+```bash
+archon complete fix/issue-42
+```
+
+---
+
+## Providers
+
+A **provider** is an AI coding agent that Archon can invoke. Three providers are available:
+
+| Provider | Description | Best for |
+|---|---|---|
+| `claude` | Claude Code (Anthropic) | Claude Pro/Max subscribers; default recommendation |
+| `codex` | Codex CLI (OpenAI) | OpenAI subscribers |
+| `pi` | Pi community provider | Access to 20+ LLM backends via `provider/model` refs |
+
+Set the default provider for a project in `.archon/config.yaml`:
+
+```yaml .archon/config.yaml
+assistant: claude
+```
+
+Override at the workflow level or per node:
+
+```yaml .archon/workflows/mixed-providers.yaml
+name: mixed-providers
+provider: claude          # workflow-level default
+
+nodes:
+  - id: plan
+    prompt: "Create an implementation plan"
+    # inherits provider: claude
+
+  - id: fast-check
+    prompt: "Quickly assess feasibility"
+    provider: pi
+    model: groq/llama-3.3-70b-versatile   # fast, cheap node
+
+  - id: implement
+    depends_on: [plan, fast-check]
+    prompt: "Implement the plan"
+    provider: claude
+    model: opus            # switch to a more capable model for implementation
+```
+
+Configuration priority: workflow-level options > `.archon/config.yaml` defaults > SDK defaults.
+
+---
+
+## Adapters
+
+An **adapter** connects Archon to a chat platform or interface. Adapters receive messages, route them to the orchestrator or workflow executor, and stream responses back.
+
+| Adapter | How to trigger workflows |
+|---|---|
+| CLI | `archon workflow run <name> "message"` |
+| Web UI | Chat interface at `http://localhost:5173` |
+| Telegram | DM your bot |
+| Slack | Message the bot in any channel it's in |
+| GitHub | `@archon fix issue #42` in any issue or PR comment |
+| Discord | Message the bot |
+
+All adapters share the same orchestrator — conversations from every platform appear in the web dashboard's unified sidebar. A workflow kicked off from Slack is visible in the web UI.
+
+Set up adapters in the [Telegram](/adapters/telegram), [Slack](/adapters/slack), [GitHub](/adapters/github), or [Discord](/adapters/discord) guides.
+
+---
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install Archon and run your first workflow.
+  </Card>
+  <Card title="Authoring workflows" icon="pen-nib" href="/guides/authoring-workflows">
+    Write multi-step YAML workflows for your project.
+  </Card>
+  <Card title="Authoring commands" icon="file-pen" href="/guides/authoring-commands">
+    Create reusable AI prompt templates.
+  </Card>
+  <Card title="Variable reference" icon="braces" href="/reference/variables">
+    All variables available in commands and workflow prompts.
+  </Card>
+</CardGroup>

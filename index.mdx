@@ -1,133 +1,122 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "Archon: AI Workflow Engine for Deterministic Coding"
+description: "Archon is an open-source harness builder for AI coding agents. Define YAML workflows to make AI development repeatable, isolated, and fire-and-forget."
 ---
 
-## Setting up
+Archon is a workflow engine for AI coding agents. Define your development processes as YAML workflows — planning, implementation, validation, code review, PR creation — and run them reliably across all your projects. Like what Dockerfiles did for infrastructure, Archon does for AI coding workflows.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Install" icon="rocket" href="/quickstart">
+    Get Archon running in 30 seconds with the standalone binary or 5 minutes with the full setup.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Core Concepts" icon="lightbulb" href="/getting-started/concepts">
+    Understand workflows, DAG nodes, isolation, and how Archon orchestrates AI agents.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Authoring Workflows" icon="code" href="/guides/authoring-workflows">
+    Create custom YAML workflows with parallel execution, loops, and approval gates.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    Full reference for every Archon command, flag, and subcommand.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Archon?
 
-Everything you need to create world-class documentation.
+When you ask an AI agent to "fix this bug," what happens depends on the model's mood. It might skip planning, forget to run tests, or write a PR description that ignores your template. Every run is different.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+Archon fixes this. Encode your development process as a workflow. The workflow defines the phases, validation gates, and artifacts. The AI fills in the intelligence at each step, but the structure is deterministic and owned by you.
 
-## Make your content agent ready
-
-Make your docs work for humans and AI agents alike.
-
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
+<CardGroup cols={2}>
+  <Card title="Repeatable" icon="rotate">
+    Same workflow, same sequence, every time. Plan, implement, validate, review, PR.
   </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
+  <Card title="Isolated" icon="shield">
+    Every workflow run gets its own git worktree. Run 5 fixes in parallel with no conflicts.
   </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
+  <Card title="Fire and forget" icon="bolt">
+    Kick off a workflow, go do other work. Come back to a finished PR with review comments.
   </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
+  <Card title="Composable" icon="puzzle-piece">
+    Mix bash scripts, tests, and git ops with AI planning and code generation nodes.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## What a workflow looks like
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Here's an Archon workflow that plans, implements until tests pass, gets your approval, then creates the PR:
+
+```yaml .archon/workflows/build-feature.yaml
+nodes:
+  - id: plan
+    prompt: "Explore the codebase and create an implementation plan"
+
+  - id: implement
+    depends_on: [plan]
+    loop:
+      prompt: "Read the plan. Implement the next task. Run validation."
+      until: ALL_TASKS_COMPLETE
+      fresh_context: true
+
+  - id: run-tests
+    depends_on: [implement]
+    bash: "bun run validate"
+
+  - id: review
+    depends_on: [run-tests]
+    prompt: "Review all changes against the plan. Fix any issues."
+
+  - id: approve
+    depends_on: [review]
+    loop:
+      prompt: "Present the changes for review. Address any feedback."
+      until: APPROVED
+      interactive: true
+
+  - id: create-pr
+    depends_on: [approve]
+    prompt: "Push changes and create a pull request"
+```
+
+## Get started
+
+<Steps>
+  <Step title="Install Archon">
+    Install the CLI binary or clone the repo for the full Web UI experience.
+    ```bash
+    curl -fsSL https://archon.diy/install | bash
+    ```
+  </Step>
+  <Step title="Run a workflow">
+    Navigate to your git repository and kick off a built-in workflow.
+    ```bash
+    cd /path/to/your/project
+    archon workflow run archon-assist "How does the auth module work?"
+    ```
+  </Step>
+  <Step title="Customize">
+    Copy a bundled workflow into `.archon/workflows/` and tailor it to your team's process.
+  </Step>
+</Steps>
+
+## Explore by topic
+
+<CardGroup cols={2}>
+  <Card title="AI Assistants" icon="robot" href="/getting-started/ai-assistants">
+    Set up Claude, Codex, or Pi as your AI provider.
+  </Card>
+  <Card title="Loop Nodes" icon="arrows-rotate" href="/guides/loop-nodes">
+    Build iterative workflows that run until a condition is met.
+  </Card>
+  <Card title="Platform Adapters" icon="plug" href="/adapters/web">
+    Connect Archon to Slack, Telegram, GitHub, or Discord.
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Run Archon as an always-on service with Docker Compose.
+  </Card>
+  <Card title="Configuration Reference" icon="gear" href="/reference/configuration">
+    All config options, environment variables, and YAML settings.
+  </Card>
+  <Card title="Workflow Schema" icon="sitemap" href="/reference/workflow-schema">
+    Complete YAML schema for every node type and workflow option.
+  </Card>
+</CardGroup>

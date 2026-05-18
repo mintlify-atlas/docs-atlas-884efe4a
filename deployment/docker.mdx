@@ -1,0 +1,655 @@
+---
+title: "Deploy Archon with Docker Compose: Profiles and HTTPS"
+description: "Run Archon in Docker using SQLite or PostgreSQL profiles, Caddy HTTPS reverse proxy, volume mounts, health checks, and basic auth protection."
+---
+
+Archon ships a multi-service Docker Compose configuration that covers every deployment scenario from a single-command local run to a fully TLS-terminated production server. This page walks through the real `docker-compose.yml` structure, the available profiles, environment variables, volume mounts, health checks, the Caddy reverse proxy setup, and day-to-day maintenance commands.
+
+<Note>
+The official `ghcr.io/coleam00/archon` image ships with Claude Code pre-installed via npm and `CLAUDE_BIN_PATH` pre-configured — no extra setup required. If you build a custom image that omits the npm install, set `CLAUDE_BIN_PATH` yourself to point at a mounted `cli.js`.
+</Note>
+
+---
+
+## Docker Compose structure
+
+The `docker-compose.yml` defines four services. The `app` service always runs; the others are gated behind profiles.
+
+```yaml docker-compose.yml
+services:
+  # Always runs
+  app:
+    build: .
+    image: archon
+    env_file: .env
+    environment:
+      ARCHON_DOCKER: "true"
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    volumes:
+      - ${ARCHON_DATA:-archon_data}:/.archon
+      - ${ARCHON_USER_HOME:-archon_user_home}:/home/appuser
+    networks:
+      - archon-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-3000}/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Optional: --profile with-db
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["with-db"]
+    environment:
+      POSTGRES_DB: remote_coding_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/000_combined.sql:/docker-entrypoint-initdb.d/000_combined.sql:ro
+      - ./migrations:/migrations:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - archon-network
+
+  # Optional: --profile cloud
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["cloud"]
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - archon-network
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # Optional: --profile auth (form-based login)
+  auth-service:
+    build: ./auth-service
+    profiles: ["auth"]
+    restart: unless-stopped
+    env_file: .env
+
+volumes:
+  archon_data:
+  archon_user_home:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+```
+
+---
+
+## Profiles
+
+Profiles let you mix and match services without editing the compose file.
+
+| Command | What runs |
+|---------|-----------|
+| `docker compose up -d` | App with SQLite (zero config) |
+| `docker compose --profile with-db up -d` | App + PostgreSQL |
+| `docker compose --profile cloud up -d` | App + Caddy HTTPS |
+| `docker compose --profile with-db --profile cloud up -d` | App + PostgreSQL + Caddy |
+| `docker compose --profile cloud --profile auth up -d` | App + Caddy + form login |
+
+<Note>
+There is no `external-db` profile. To connect to an external PostgreSQL database (Supabase, Neon, etc.), set `DATABASE_URL` in `.env` and run `docker compose up -d` with no profile. The base `app` service always starts.
+</Note>
+
+### SQLite (default, no profile)
+
+Zero-config default. The SQLite file is stored in the `archon_data` Docker-managed volume at `/.archon/archon.db`. No database container needed.
+
+### PostgreSQL (`--profile with-db`)
+
+Starts a PostgreSQL 17 container. The schema is auto-initialized on first startup via the mounted migration file. Set the connection URL in `.env`:
+
+```ini .env
+DATABASE_URL=postgresql://postgres:postgres@postgres:5432/remote_coding_agent
+```
+
+PostgreSQL is exposed on `127.0.0.1:${POSTGRES_PORT:-5432}` for external tools. The hostname inside the Docker network is `postgres` (the service name) — not `localhost`.
+
+### Caddy HTTPS (`--profile cloud`)
+
+Adds a [Caddy](https://caddyserver.com/) reverse proxy with automatic TLS certificates from Let's Encrypt. Caddy handles HTTPS, HTTP→HTTPS redirects, HTTP/3, and SSE streaming.
+
+**Before starting with `--profile cloud`:**
+
+1. Create the Caddyfile: `cp Caddyfile.example Caddyfile`
+2. Set `DOMAIN=archon.example.com` in `.env`
+3. Create a DNS A record pointing to your server's public IP
+4. Open ports 80 and 443 in your firewall
+
+---
+
+## Quick start (local Docker Desktop)
+
+<Steps>
+  <Step title="Clone and configure">
+    ```bash
+    git clone https://github.com/coleam00/Archon.git
+    cd Archon
+    cp .env.example .env
+    ```
+
+    Edit `.env` and set at least one AI credential (see below).
+  </Step>
+
+  <Step title="Start the app">
+    ```bash
+    docker compose up -d
+    ```
+
+    The Web UI is available at **http://localhost:3000**.
+  </Step>
+
+  <Step title="Verify health">
+    ```bash
+    curl http://localhost:3000/api/health
+    # {"status":"ok"}
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**Windows users:** Build from a WSL terminal, not PowerShell. Docker Desktop on Windows cannot follow Bun workspace symlinks during the build context transfer. If you see `The file cannot be accessed by the system`, open WSL and run from there.
+</Warning>
+
+---
+
+## Server deployment (manual)
+
+<Steps>
+  <Step title="Install Docker">
+    ```bash
+    curl -fsSL https://get.docker.com | sh
+    sudo usermod -aG docker $USER
+    # Log out and back in for the group change to take effect
+    docker --version && docker compose version
+    ```
+  </Step>
+
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/coleam00/Archon.git
+    cd Archon
+    ```
+  </Step>
+
+  <Step title="Configure environment">
+    ```bash
+    cp .env.example .env
+    cp Caddyfile.example Caddyfile
+    nano .env
+    ```
+
+    Set these values at minimum:
+
+    ```ini .env
+    # AI credential — choose one
+    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+    # CLAUDE_API_KEY=sk-ant-xxxxx
+
+    # Domain (required for --profile cloud)
+    DOMAIN=archon.example.com
+
+    # Database (optional — omit to use SQLite)
+    DATABASE_URL=postgresql://postgres:postgres@postgres:5432/remote_coding_agent
+    ```
+  </Step>
+
+  <Step title="Point your domain">
+    Create a DNS **A record** at your registrar:
+
+    | Type | Name | Value |
+    |------|------|-------|
+    | A | `archon` | Your server's public IP |
+
+    Wait for DNS propagation (5–60 minutes). Verify with `dig archon.example.com`.
+  </Step>
+
+  <Step title="Open firewall ports">
+    ```bash
+    sudo ufw allow 22/tcp
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443
+    sudo ufw --force enable
+    ```
+  </Step>
+
+  <Step title="Start services">
+    ```bash
+    docker compose --profile with-db --profile cloud up -d
+    ```
+
+    This starts three containers: `app`, `postgres`, and `caddy`.
+  </Step>
+
+  <Step title="Verify">
+    ```bash
+    docker compose --profile with-db --profile cloud ps
+    curl https://archon.example.com/api/health
+    ```
+
+    Open `https://archon.example.com` in your browser — you should see the Archon Web UI.
+  </Step>
+</Steps>
+
+---
+
+## Cloud-Init (fastest setup)
+
+For a fully automated server bootstrap, paste the contents of `deploy/cloud-init.yml` into the **User Data** field when creating a VPS. It installs Docker, UFW, clones the repo, pre-pulls images, and builds the Archon image automatically.
+
+| Provider | Where to paste |
+|----------|---------------|
+| DigitalOcean | Create Droplet → Advanced Options → User Data |
+| AWS EC2 | Launch Instance → Advanced Details → User Data |
+| Linode | Create Linode → Metadata (User Data) |
+| Hetzner | Create Server → Cloud config → User Data |
+| Vultr | Deploy → Additional Features → Cloud-Init User-Data |
+
+After the server boots (5–8 minutes), SSH in and complete configuration:
+
+```bash
+# Confirm setup finished
+cat /opt/archon/SETUP_COMPLETE
+
+# Edit credentials and domain
+nano /opt/archon/.env
+# Set CLAUDE_CODE_OAUTH_TOKEN, DOMAIN, DATABASE_URL
+
+# Start
+cd /opt/archon
+docker compose --profile with-db --profile cloud up -d
+```
+
+---
+
+## Environment variables
+
+### AI credentials (required — choose one)
+
+```ini .env
+# Claude OAuth token — run `claude setup-token` on your local machine
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+
+# Or Claude API key — from console.anthropic.com/settings/keys
+# CLAUDE_API_KEY=sk-ant-xxxxx
+```
+
+<Warning>
+Docker containers cannot use `CLAUDE_USE_GLOBAL_AUTH=true` — there is no local `claude` CLI inside the container. You must provide `CLAUDE_CODE_OAUTH_TOKEN` or `CLAUDE_API_KEY` explicitly.
+</Warning>
+
+### Server settings
+
+```ini .env
+PORT=3000                          # Default in Docker: 3000
+DOMAIN=archon.example.com          # Required for --profile cloud
+LOG_LEVEL=info                     # fatal|error|warn|info|debug|trace
+MAX_CONCURRENT_CONVERSATIONS=10
+```
+
+### Platform tokens (optional)
+
+```ini .env
+TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+DISCORD_BOT_TOKEN=...
+GH_TOKEN=ghp_...
+GITHUB_TOKEN=ghp_...
+WEBHOOK_SECRET=...
+```
+
+---
+
+## Volume mounts
+
+### Data directory (`/.archon`)
+
+All workspaces, worktrees, artifacts, logs, and the SQLite DB are stored at `/.archon` inside the container. By default this is the Docker-managed `archon_data` volume. To store data at a specific host path, set `ARCHON_DATA` in `.env`:
+
+```ini .env
+ARCHON_DATA=/opt/archon-data
+```
+
+The path must be writable by UID 1001 (the container user `appuser`):
+
+```bash
+mkdir -p /opt/archon-data
+sudo chown -R 1001:1001 /opt/archon-data
+```
+
+### User home directory (`/home/appuser`)
+
+The container's `/home/appuser` is persisted by default via the `archon_user_home` named volume. This preserves Claude Code skills, commands, agents, hooks, MCP config, Codex and Pi auth state, `~/.gitconfig`, and shell history across container rebuilds.
+
+| Path | What it persists |
+|------|-----------------|
+| `~/.claude/` | Claude Code skills, commands, agents, hooks, MCP config, OAuth state |
+| `~/.codex/` | Codex auth (`auth.json`) |
+| `~/.pi/agent/` | Pi auth and session data |
+| `~/.gitconfig` | Author identity, signing config, aliases |
+| `~/.config/gh/` | GitHub CLI auth |
+
+To use a host path instead of the Docker volume:
+
+```ini .env
+ARCHON_USER_HOME=/opt/archon-user-home
+```
+
+```bash
+mkdir -p /opt/archon-user-home
+sudo chown -R 1001:1001 /opt/archon-user-home
+```
+
+---
+
+## Caddy reverse proxy
+
+The `Caddyfile.example` supports three authentication modes — choose one:
+
+```caddy Caddyfile.example
+{$DOMAIN} {
+  # Public paths — always bypass auth
+  handle /webhooks/* {
+    reverse_proxy app:{$PORT:3000}
+  }
+  handle /api/health {
+    reverse_proxy app:{$PORT:3000}
+  }
+
+  # Option B: Basic auth (browser popup)
+  # Generate hash: docker run caddy caddy hash-password --plaintext 'YOUR_PASSWORD'
+  # Then set in .env: CADDY_BASIC_AUTH=basicauth @protected { admin $$2a$$14$$<hash> }
+  @protected not path /webhooks/* /api/health
+  {$CADDY_BASIC_AUTH:}
+
+  # No auth (default) — comment out when using Option A
+  handle {
+    @sse path /api/stream/*
+    reverse_proxy @sse app:{$PORT:3000} {
+      flush_interval -1
+    }
+    reverse_proxy app:{$PORT:3000}
+  }
+
+  # Security headers
+  header {
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    -Server
+  }
+
+  encode gzip zstd
+}
+```
+
+### Basic auth (Option B)
+
+HTTP Basic Auth — the browser shows a native credential dialog. No extra container required.
+
+<Steps>
+  <Step title="Generate a bcrypt hash">
+    ```bash
+    docker run caddy caddy hash-password --plaintext 'YOUR_PASSWORD'
+    ```
+  </Step>
+
+  <Step title="Set CADDY_BASIC_AUTH in .env">
+    ```ini .env
+    CADDY_BASIC_AUTH=basicauth @protected { admin $$2a$$14$$abc123... }
+    ```
+
+    Use `$$` to escape `$` in bcrypt hashes — Docker Compose interprets bare `$` as variable substitution.
+  </Step>
+
+  <Step title="Restart Caddy">
+    ```bash
+    docker compose --profile cloud restart caddy
+    ```
+  </Step>
+</Steps>
+
+### Form-based auth (Option A)
+
+A styled HTML login form with session cookies. Requires the `auth-service` sidecar container.
+
+<Steps>
+  <Step title="Generate a bcrypt hash">
+    ```bash
+    docker compose --profile auth run --rm auth-service \
+      node -e "require('bcryptjs').hash('YOUR_PASSWORD', 12).then(h => console.log(h))"
+    ```
+  </Step>
+
+  <Step title="Generate a cookie secret">
+    ```bash
+    docker run --rm node:22-alpine \
+      node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    ```
+  </Step>
+
+  <Step title="Set credentials in .env">
+    ```ini .env
+    AUTH_USERNAME=admin
+    AUTH_PASSWORD_HASH=$2b$12$REPLACE_WITH_YOUR_HASH
+    COOKIE_SECRET=REPLACE_WITH_64_HEX_CHARS
+    ```
+  </Step>
+
+  <Step title="Uncomment Option A in Caddyfile">
+    Uncomment the `handle /login`, `handle /logout`, and `handle { forward_auth ... }` blocks, then comment out the default `handle` block.
+  </Step>
+
+  <Step title="Start with both profiles">
+    ```bash
+    docker compose --profile with-db --profile cloud --profile auth up -d
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Do not enable both form auth and basic auth simultaneously. Choose one method.
+</Note>
+
+---
+
+## Port configuration
+
+<Warning>
+Docker defaults to port **3000** (`${PORT:-3000}`), while local development defaults to **3090**. Set `PORT` in `.env` to change the Docker port.
+</Warning>
+
+The health check endpoint inside Docker is `/api/health`:
+
+```bash
+# Inside Docker
+curl http://localhost:3000/api/health
+
+# Local development (both aliases work)
+curl http://localhost:3090/health
+curl http://localhost:3090/api/health
+```
+
+---
+
+## Customizing the image
+
+To add extra tools without modifying the tracked Dockerfile:
+
+<Steps>
+  <Step title="Copy the example Dockerfile">
+    ```bash
+    # Local/dev
+    cp Dockerfile.user.example Dockerfile.user
+
+    # Server/deploy
+    cp deploy/Dockerfile.user.example Dockerfile.user
+    ```
+  </Step>
+
+  <Step title="Copy the override file">
+    ```bash
+    # Local/dev
+    cp docker-compose.override.example.yml docker-compose.override.yml
+    ```
+
+    Compose automatically merges `docker-compose.override.yml` when both files are present — no extra flags needed.
+  </Step>
+
+  <Step title="Edit Dockerfile.user and start">
+    ```bash
+    docker compose up -d
+    ```
+
+    Both `Dockerfile.user` and `docker-compose.override.yml` are gitignored so your customizations stay local.
+  </Step>
+</Steps>
+
+---
+
+## Maintenance
+
+### View logs
+
+```bash
+docker compose logs -f              # All services
+docker compose logs -f app          # App only
+docker compose logs --tail=100 app  # Last 100 lines
+```
+
+### Update
+
+```bash
+git pull
+docker compose --profile with-db --profile cloud up -d --build
+```
+
+### Restart and stop
+
+```bash
+docker compose restart app
+docker compose down            # Stop (data preserved)
+docker compose down -v         # Stop and delete volumes — destructive!
+```
+
+### PostgreSQL migrations
+
+Migrations run automatically on first startup. When upgrading to a version that adds new tables, apply incremental migrations manually:
+
+```bash
+docker compose exec postgres psql -U postgres -d remote_coding_agent \
+  -f /migrations/020_codebase_env_vars.sql
+```
+
+The `migrations/` directory is mounted read-only into the postgres container. Check for new migration files after pulling updates.
+
+### Clean up Docker resources
+
+```bash
+docker system prune -a   # Remove unused images/containers
+docker volume prune      # Remove unused volumes — check before running
+docker system df         # Check disk usage
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="App won't start: no_ai_credentials">
+    Docker does not support `CLAUDE_USE_GLOBAL_AUTH=true`. Set one of these in `.env`:
+
+    ```ini .env
+    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+    # or
+    CLAUDE_API_KEY=sk-ant-...
+    ```
+
+    Run `claude setup-token` on your local machine to generate an OAuth token.
+  </Accordion>
+
+  <Accordion title="Caddy fails: 'not a directory'">
+    Docker created a directory where `Caddyfile` should be a file. Fix:
+
+    ```bash
+    rm -rf Caddyfile
+    cp Caddyfile.example Caddyfile
+    docker compose --profile cloud up -d
+    ```
+  </Accordion>
+
+  <Accordion title="Caddy not getting SSL certificate">
+    ```bash
+    dig archon.example.com        # Should return your server IP
+    sudo ufw status               # Ports 80 and 443 must be open
+    docker compose logs caddy     # Check for certificate errors
+    ```
+
+    Common causes: DNS not propagated (wait 5–60 min), firewall blocking 80/443, domain typo in `.env`.
+  </Accordion>
+
+  <Accordion title="PostgreSQL connection refused">
+    Ensure `DATABASE_URL` uses `postgres` as the hostname (the Docker service name), not `localhost`:
+
+    ```ini .env
+    DATABASE_URL=postgresql://postgres:postgres@postgres:5432/remote_coding_agent
+    ```
+
+    Check that the container is healthy: `docker compose ps postgres`.
+  </Accordion>
+
+  <Accordion title="Permission errors in /.archon/">
+    The container runs as `appuser` (UID 1001). If using bind mounts:
+
+    ```bash
+    sudo chown -R 1001:1001 /path/to/archon-data
+    ```
+  </Accordion>
+
+  <Accordion title="Container keeps restarting">
+    ```bash
+    docker compose ps
+    docker compose logs --tail=50 app
+    ```
+
+    Common causes: missing `.env` file, invalid credentials, database unreachable.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Cloud deployment" icon="cloud" href="/deployment/cloud">
+    Deploy to a VPS with systemd, Caddy HTTPS, and firewall configuration for always-on uptime.
+  </Card>
+  <Card title="Local development" icon="code" href="/deployment/local">
+    Run Archon from source with Bun for hot-reload development.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config file options.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/reference/troubleshooting">
+    Diagnose common startup and runtime issues.
+  </Card>
+</CardGroup>

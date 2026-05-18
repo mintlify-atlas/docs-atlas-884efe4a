@@ -1,0 +1,270 @@
+---
+title: "Archon Troubleshooting: Common Issues and Fixes"
+description: "Solutions for the most common Archon problems: Claude not found, worktree errors, port conflicts, database issues, webhook setup, and Docker failures."
+---
+
+Archon surfaces most issues with actionable error messages, but some problems need a bit of extra diagnosis. This page covers the most common issues grouped by area — work through the relevant section and run `archon doctor` after applying a fix to confirm your setup is healthy.
+
+<AccordionGroup>
+  <Accordion title="Claude Code not found (compiled binary)">
+    **Symptom:** A workflow fails with:
+    ```
+    Claude Code not found. Archon requires the Claude Code executable to be
+    reachable at a configured path in compiled builds.
+    ```
+
+    **Cause:** Compiled Archon binaries (from the curl/PowerShell installer or Homebrew) don't bundle Claude Code. You need to install it separately and tell Archon where it is.
+
+    **Fix:**
+    <Tabs>
+      <Tab title="macOS / Linux / WSL">
+        ```bash
+        curl -fsSL https://claude.ai/install.sh | bash
+        export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
+        ```
+        To persist across sessions, add to `~/.archon/config.yaml`:
+        ```yaml ~/.archon/config.yaml
+        assistants:
+          claude:
+            claudeBinaryPath: /home/youruser/.local/bin/claude
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        irm https://claude.ai/install.ps1 | iex
+        $env:CLAUDE_BIN_PATH = "$env:USERPROFILE\.local\bin\claude.exe"
+        ```
+      </Tab>
+    </Tabs>
+
+    Run `archon doctor` to confirm the binary is found. Docker users don't need this — the image pre-sets the path.
+  </Accordion>
+
+  <Accordion title="Worktree belongs to a different clone">
+    **Symptom:** Errors like:
+    - `Worktree at <path> belongs to a different clone`
+    - `Cannot adopt <path>: path contains a full git checkout, not a worktree`
+    - `Cannot verify worktree ownership at <path>`
+
+    **Cause:** Archon identifies codebases by their remote URL (`owner/repo`), so two local clones of the same remote share one workspace path. A worktree created by one clone can't be safely adopted by another.
+
+    **Fix — pick one:**
+    1. Clean up the conflicting worktree from the other clone:
+       ```bash
+       archon isolation list
+       archon complete <branch-name>
+       ```
+    2. Use a different branch name so they don't compete:
+       ```bash
+       archon workflow run <name> --branch <different-name> "task"
+       ```
+    3. Consolidate to a single local clone of the repo.
+  </Accordion>
+
+  <Accordion title="Stale workspace symlink / repository registration failed">
+    **Symptom:**
+    ```
+    Cannot create worktree: repository registration failed.
+    Error: Source symlink at ~/.archon/workspaces/.../source already points to <old-path>
+    ```
+
+    **Fix:** Delete the stale workspace entry and retry:
+    ```bash
+    rm -rf ~/.archon/workspaces/<owner>/<repo>
+    archon workflow run <name> "task"
+    ```
+    Or skip isolation for one run:
+    ```bash
+    archon workflow run <name> --no-worktree "task"
+    ```
+  </Accordion>
+
+  <Accordion title="Workflow hangs silently inside Claude Code">
+    **Symptom:** Workflows started from a Claude Code terminal session produce no output, or the CLI shows a `CLAUDECODE=1` warning and then hangs.
+
+    **Cause:** Nested Claude Code sessions can deadlock.
+
+    **Fix:** Run `archon serve` from a regular shell outside Claude Code and use the Web UI or HTTP API. To suppress the warning if you have a non-deadlocking setup:
+    ```bash
+    ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 archon workflow run ...
+    ```
+    To extend the first-event timeout:
+    ```bash
+    ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS=120000 archon workflow run ...
+    ```
+  </Accordion>
+
+  <Accordion title="Port 3090 already in use">
+    **Check which process holds the port:**
+
+    <Tabs>
+      <Tab title="macOS / Linux">
+        ```bash
+        lsof -i :3090
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        netstat -ano | findstr :3090
+        tasklist | findstr <PID>
+        taskkill /F /PID <PID>
+        ```
+        Do not kill `claude.exe` processes — those are active Claude Code sessions.
+      </Tab>
+    </Tabs>
+
+    Override the port:
+    ```bash
+    PORT=4000 bun run dev
+    ```
+
+    <Note>In git worktrees, Archon auto-allocates a unique port in the 3190–4089 range — no manual override needed.</Note>
+  </Accordion>
+
+  <Accordion title="Database connection errors">
+    **Check health:**
+    ```bash
+    curl http://localhost:3090/health
+    # Expected: {"status":"ok"}
+    ```
+
+    **SQLite (default):** No setup needed. The database is created automatically at `~/.archon/archon.db`. If you see errors, verify `~/.archon/` exists and is writable.
+
+    **PostgreSQL:**
+    ```bash
+    # Test connection
+    psql $DATABASE_URL -c "SELECT 1"
+
+    # Verify tables exist
+    psql $DATABASE_URL -c "\dt remote_agent_*"
+    ```
+
+    If tables are missing, run the migration:
+    ```bash
+    psql $DATABASE_URL < migrations/000_combined.sql
+    ```
+  </Accordion>
+
+  <Accordion title="GitHub webhook not triggering">
+    **Check delivery in GitHub UI:** Go to your repo → Settings → Webhooks → Recent Deliveries. Look for failed deliveries with error details.
+
+    **Verify webhook secret matches exactly:**
+    ```bash
+    grep WEBHOOK_SECRET .env
+    ```
+
+    **For local development,** verify your tunnel is active:
+    ```bash
+    curl http://localhost:4040/api/tunnels
+    ```
+
+    **Remember:** Archon only responds to `@archon` mentions in **issue and PR comments** — not in descriptions. This is by design to prevent false triggers from docs that contain example commands.
+  </Accordion>
+
+  <Accordion title="Telegram / Slack / Discord bot not responding">
+    **Check the server is running:**
+    ```bash
+    curl http://localhost:3090/health
+    ```
+
+    **Check application logs:**
+    ```bash
+    # Local
+    bun run dev   # logs print to stdout
+
+    # Docker
+    docker compose logs -f app
+    ```
+
+    **Verify tokens are set:**
+    ```bash
+    # Telegram
+    grep TELEGRAM_BOT_TOKEN .env
+
+    # Slack
+    grep SLACK_BOT_TOKEN .env
+    grep SLACK_APP_TOKEN .env
+
+    # Discord
+    grep DISCORD_BOT_TOKEN .env
+    ```
+
+    **Telegram / Discord unauthorized:** If `TELEGRAM_ALLOWED_USER_IDS` or `DISCORD_ALLOWED_USER_IDS` is set, make sure your user ID is in the list. These adapters silently reject unauthorized users.
+  </Accordion>
+
+  <Accordion title="Docker container won't start">
+    ```bash
+    # Check logs for specific errors
+    docker compose logs app
+
+    # Verify env vars are parsed correctly
+    docker compose config
+
+    # Rebuild without cache
+    docker compose build --no-cache
+    docker compose up -d
+    ```
+
+    **PostgreSQL profile:**
+    ```bash
+    docker compose --profile with-db ps postgres
+    docker compose logs -f postgres
+    ```
+  </Accordion>
+
+  <Accordion title="'command not found: bun' or 'command not found: archon'">
+    **Bun not found:**
+    ```bash
+    curl -fsSL https://bun.sh/install | bash
+    # Then restart your terminal or: source ~/.bashrc
+    ```
+
+    **archon not in PATH after bun link:**
+    ```bash
+    echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    archon version
+    ```
+
+    **Binary install not in PATH:**
+    The curl installer places the binary at `~/.local/bin/archon`. Add to PATH:
+    ```bash
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    ```
+  </Accordion>
+
+  <Accordion title="GitHub token / clone errors (401 or 403)">
+    **Verify your token:**
+    ```bash
+    curl -H "Authorization: token $(grep GH_TOKEN .env | cut -d= -f2)" \
+      https://api.github.com/user
+    ```
+    If this returns your profile, the token is valid. If not, regenerate it at [github.com/settings/tokens](https://github.com/settings/tokens) with `repo` scope.
+
+    Make sure both variables are set in `.env`:
+    ```ini
+    GH_TOKEN=ghp_your_token_here
+    GITHUB_TOKEN=ghp_your_token_here
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Running diagnostics
+
+`archon doctor` checks your entire setup in one command — Claude binary, GitHub auth, database connectivity, and configured adapter credentials:
+
+```bash
+archon doctor
+```
+
+If you're still stuck after working through the relevant accordion above, check the [GitHub Issues](https://github.com/coleam00/Archon/issues) or open a new one with the output of `archon doctor`.
+
+<CardGroup cols={2}>
+  <Card title="Configuration Reference" icon="gear" href="/reference/configuration">
+    All config options, env vars, and YAML settings.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    Every command, flag, and subcommand documented.
+  </Card>
+</CardGroup>

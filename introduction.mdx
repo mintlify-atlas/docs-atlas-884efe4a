@@ -1,0 +1,118 @@
+---
+title: "What is Archon: AI Workflow Engine Overview"
+description: "Archon is an open-source workflow engine that makes AI coding deterministic and repeatable — define processes as YAML DAGs, run them across any project."
+keywords: ["archon", "ai coding", "workflow engine", "dag", "deterministic", "claude code"]
+---
+
+Archon is an open-source workflow engine for AI coding agents. Where a plain AI session is unpredictable — the model might skip planning, forget to run tests, or produce a different structure each time — Archon lets you encode your entire development process as a YAML workflow that runs the same way every time. Think of it as what Dockerfiles did for infrastructure, or what GitHub Actions did for CI/CD, applied to AI-assisted software development.
+
+## The problem Archon solves
+
+When you ask an AI agent to "fix this bug", the outcome depends on the model's mood. It might skip investigation. It might not run your test suite. It might write a PR description that ignores your template. Every run is different, and none of it is owned by you.
+
+Archon fixes this by separating **structure** from **intelligence**. You define the phases, validation gates, and handoffs in YAML. The AI fills in the intelligence at each node — planning, coding, reviewing — but the sequence is deterministic and version-controlled alongside your project.
+
+```yaml .archon/workflows/build-feature.yaml
+nodes:
+  - id: plan
+    prompt: "Explore the codebase and create an implementation plan"
+
+  - id: implement
+    depends_on: [plan]
+    loop:
+      prompt: "Read the plan. Implement the next task. Run validation."
+      until: ALL_TASKS_COMPLETE
+      fresh_context: true
+
+  - id: run-tests
+    depends_on: [implement]
+    bash: "bun run validate"
+
+  - id: review
+    depends_on: [run-tests]
+    prompt: "Review all changes against the plan. Fix any issues."
+
+  - id: approve
+    depends_on: [review]
+    loop:
+      prompt: "Present the changes for review. Address any feedback."
+      until: APPROVED
+      interactive: true
+
+  - id: create-pr
+    depends_on: [approve]
+    prompt: "Push changes and create a pull request"
+```
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="DAG workflows" icon="diagram-project">
+    Define multi-step coding tasks as directed acyclic graphs. Independent nodes run in parallel; dependent nodes wait. Fan out for parallel reviews, converge for final actions.
+  </Card>
+  <Card title="Git worktree isolation" icon="code-branch">
+    Every workflow run gets its own git worktree. Run five parallel fixes without conflicts. Failed runs don't leave your working branch dirty.
+  </Card>
+  <Card title="Multi-platform" icon="plug">
+    Trigger workflows from the CLI, the web dashboard, Telegram, Slack, Discord, or GitHub webhooks. All conversations appear in one unified dashboard.
+  </Card>
+  <Card title="Multi-provider" icon="robot">
+    Mix Claude Code, Codex, and Pi (20+ LLM backends) within a single workflow. Set a default per project or override per node.
+  </Card>
+</CardGroup>
+
+## How it works
+
+Archon sits between you and your AI coding agent. When you run a workflow, Archon:
+
+1. Creates an isolated git worktree for the task
+2. Executes each DAG node in topological order (parallel where possible)
+3. At each AI node, invokes the configured provider with the resolved prompt
+4. Captures outputs and passes them to downstream nodes via `$nodeId.output`
+5. Runs bash or script nodes deterministically (no AI involved)
+6. Surfaces results, artifacts, and PR links back to you
+
+```
+Platform Adapters (Web UI, CLI, Telegram, Slack, Discord, GitHub)
+                            │
+                     Orchestrator
+               (Routing & Context Management)
+                 │                       │
+         Command Handler          Workflow Executor
+          (Slash cmds)              (YAML DAG)
+                 │                       │
+                 └───────────────────────┘
+                            │
+              SQLite / PostgreSQL (7 Tables)
+```
+
+## Bundled workflows
+
+Archon ships 17 production-ready workflows. A few highlights:
+
+| Workflow | What it does |
+|---|---|
+| `archon-assist` | General Q&A, debugging, exploration — full agent with all tools |
+| `archon-fix-github-issue` | Classify → investigate → implement → validate → PR → review → self-fix |
+| `archon-idea-to-pr` | Feature idea → plan → implement → validate → PR → 5 parallel reviews → self-fix |
+| `archon-smart-pr-review` | Complexity-adaptive PR review, routes to relevant agents only |
+| `archon-resolve-conflicts` | Detect merge conflicts → analyze → resolve → validate → commit |
+
+You don't need to remember workflow names. Describe what you want — "fix issue #42", "review this PR" — and the router picks the best match. Run `archon workflow list` to see everything available.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install Archon and run your first workflow in under five minutes.
+  </Card>
+  <Card title="Core concepts" icon="book-open" href="/getting-started/concepts">
+    Understand workflows, DAG nodes, isolation, providers, and adapters.
+  </Card>
+  <Card title="AI assistants" icon="wand-magic-sparkles" href="/getting-started/ai-assistants">
+    Set up Claude Code, Codex, or Pi as your AI backend.
+  </Card>
+  <Card title="Authoring workflows" icon="pen-nib" href="/guides/authoring-workflows">
+    Write custom YAML workflows tailored to your project.
+  </Card>
+</CardGroup>

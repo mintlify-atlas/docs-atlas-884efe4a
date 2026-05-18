@@ -1,0 +1,215 @@
+---
+title: "GitHub webhook adapter: trigger Archon from issues and PRs"
+description: "Set up a GitHub webhook, configure WEBHOOK_SECRET and GH_TOKEN, and invoke Archon by @mentioning it in issue or pull request comments."
+---
+
+The GitHub adapter lets you interact with Archon directly from GitHub issues and pull requests. When you @mention the bot in a **comment**, Archon clones the repository (if needed), loads project-specific commands, and responds in the same thread — all without leaving GitHub. This page covers generating a webhook secret, exposing your server for local development, configuring the webhook, setting environment variables, and understanding how conversation IDs and event handling work.
+
+## Prerequisites
+
+- Archon server running — see [Quickstart](/quickstart)
+- A GitHub repository with issues enabled
+- `GH_TOKEN` or `GITHUB_TOKEN` set (for cloning private repos and posting comments)
+- A publicly reachable URL for the webhook (or a tunnel for local development)
+
+## How conversation IDs work
+
+Each GitHub issue or pull request maps to a single Archon conversation. The conversation ID uses the format `owner/repo#number` — for example, `coleam00/Archon#42`. This means:
+
+- All comments on an issue share one conversation and full context is preserved across multiple @mentions
+- A PR and its linked issue each have their own conversation ID
+- Archon automatically clones the repository on the first @mention and reuses the existing clone on subsequent ones
+
+## Setup
+
+<Steps>
+  <Step title="Generate a webhook secret">
+    The secret is used to verify that webhook payloads come from GitHub (HMAC SHA-256 signature). Generate one with:
+
+    <Tabs>
+      <Tab title="Linux / macOS">
+        ```bash
+        openssl rand -hex 32
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+        ```
+      </Tab>
+    </Tabs>
+
+    Save the output — you need it in steps 3 and 4.
+  </Step>
+  <Step title="Expose your server (local development only)">
+    GitHub must be able to reach your server over HTTPS. For local development, use a tunnel.
+
+    <Tabs>
+      <Tab title="ngrok (free tier)">
+        ```bash
+        # Install: https://ngrok.com/download
+        ngrok http 3090
+        # Copy the HTTPS URL, e.g. https://abc123.ngrok-free.app
+        ```
+
+        Keep this terminal open while testing. Free tier URLs change on restart.
+      </Tab>
+      <Tab title="Cloudflare Tunnel (persistent)">
+        ```bash
+        # Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/
+        cloudflared tunnel --url http://localhost:3090
+        ```
+
+        Persistent URLs survive restarts.
+      </Tab>
+    </Tabs>
+
+    For production deployments, use your server's public domain — no tunnel needed.
+  </Step>
+  <Step title="Add the webhook to your repository">
+    Go to your repository's webhook settings:
+
+    ```
+    https://github.com/owner/repo/settings/hooks
+    ```
+
+    Click **Add webhook** and fill in:
+
+    | Field | Value |
+    |-------|-------|
+    | Payload URL | `https://<your-domain>/webhooks/github` |
+    | Content type | `application/json` |
+    | Secret | The value from step 1 |
+    | SSL verification | Enabled (recommended) |
+    | Events | **Issues**, **Issue comments**, **Pull requests** |
+
+    Click **Add webhook**. GitHub sends a ping — a green checkmark confirms delivery.
+
+    <Warning>
+      For multiple repositories, add the webhook to each one individually. The same `WEBHOOK_SECRET` value must be used across all repos.
+    </Warning>
+  </Step>
+  <Step title="Set environment variables">
+    ```ini
+    # GitHub webhook signature verification
+    WEBHOOK_SECRET=your_secret_from_step_1
+
+    # GitHub token for cloning repos and posting comments
+    GH_TOKEN=ghp_yourPersonalAccessToken
+    GITHUB_TOKEN=ghp_yourPersonalAccessToken  # alias — same value
+    ```
+
+    `WEBHOOK_SECRET` must match exactly what you entered in the GitHub webhook configuration. `GH_TOKEN` and `GITHUB_TOKEN` are both read — set either one (or both to the same value).
+  </Step>
+  <Step title="Restart Archon">
+    ```bash
+    bun run dev
+    ```
+
+    Look for `github.webhook_adapter_ready` in the server logs. The adapter is now listening for webhook events at `/webhooks/github`.
+  </Step>
+</Steps>
+
+## Usage
+
+Trigger Archon by @mentioning it in an issue or PR **comment**:
+
+```
+@archon can you analyze this bug?
+```
+
+```
+@archon prime the codebase
+```
+
+```
+@archon review this implementation
+```
+
+<Warning>
+  **Only comments trigger the bot.** @mentions in issue or PR *descriptions* are intentionally ignored. Descriptions often contain example commands or documentation — those are not bot invocations. See [GitHub issue #96](https://github.com/coleam00/Archon/issues/96) for background.
+</Warning>
+
+### First mention behavior
+
+On the first @mention in a repository, Archon:
+
+1. Clones the repository to `~/.archon/workspaces/owner/repo/source/`
+2. Loads commands from `.archon/commands/` if present
+3. Injects full issue or PR context (title, description, labels, status) for the AI assistant
+
+### Subsequent mentions
+
+All follow-up @mentions in the same issue or PR resume the existing conversation with full context preserved across comments.
+
+### Supported events
+
+| GitHub event | What Archon does |
+|---|---|
+| `issue_comment.created` with @mention | Processes the comment as a message |
+| `issues.closed` | Cleans up the associated worktree environment |
+| `pull_request.closed` / `.merged` | Cleans up the associated worktree environment |
+| `issues.opened` | Ignored (descriptions are not treated as commands) |
+| `pull_request.opened` | Ignored (descriptions are not treated as commands) |
+
+## Restricting access (optional)
+
+To limit which GitHub users can trigger webhook processing:
+
+```ini
+# Comma-separated GitHub usernames (case-insensitive)
+GITHUB_ALLOWED_USERS=octocat,monalisa
+```
+
+When set, webhooks from users not in the list are **silently rejected** — Archon returns `200 OK` to GitHub but does not process the event. When empty or unset, all users can trigger the bot.
+
+## Custom bot mention name (optional)
+
+By default Archon responds to `@archon`. To use a different name (for example if your bot account has a different username):
+
+```ini
+GITHUB_BOT_MENTION=mybot
+```
+
+With this set, `@mybot` in comments triggers Archon instead of `@archon`.
+
+## Adding more repositories
+
+Once your server is running with a `WEBHOOK_SECRET`, add more repositories by creating a webhook in each one pointing to the same server URL with the same secret.
+
+**Via GitHub CLI:**
+
+```bash
+WEBHOOK_SECRET=$(grep WEBHOOK_SECRET .env | cut -d= -f2)
+
+gh api repos/OWNER/REPO/hooks --method POST \
+  -f "config[url]=https://YOUR_DOMAIN/webhooks/github" \
+  -f "config[content_type]=json" \
+  -f "config[secret]=$WEBHOOK_SECRET" \
+  -f "events[]=issues" \
+  -f "events[]=issue_comment" \
+  -f "events[]=pull_request"
+```
+
+## Security
+
+- Archon verifies every incoming webhook using HMAC SHA-256 (`X-Hub-Signature-256` header) and timing-safe comparison — payloads with invalid signatures are dropped silently
+- Bot comments include a hidden HTML marker (`<!-- archon-bot-response -->`) to prevent self-triggering loops
+- Never commit `WEBHOOK_SECRET` or `GH_TOKEN` to version control
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config options.
+  </Card>
+  <Card title="Approval nodes" icon="check-circle" href="/guides/approval-nodes">
+    Add human review gates to your GitHub-triggered workflows.
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment/docker">
+    Run Archon with Docker for a production-ready public endpoint.
+  </Card>
+  <Card title="Architecture" icon="layout" href="/reference/architecture">
+    Understand how the GitHub adapter fits into the broader system.
+  </Card>
+</CardGroup>

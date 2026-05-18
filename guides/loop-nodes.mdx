@@ -1,0 +1,412 @@
+---
+title: "Loop Nodes: Iterative AI Execution in Workflows"
+description: "Repeat an AI prompt in Archon until a completion signal using loop nodes. Covers fresh context, deterministic bash exits, $LOOP_PREV_OUTPUT, and interactive feedback gates."
+---
+
+Loop nodes let a single DAG node run an AI prompt repeatedly until a completion condition is met. Each iteration is a full AI agent session that can read files, write code, run commands, and produce output—giving you autonomous multi-step execution that adapts based on what it finds on disk. This page covers every configuration field, completion signal formats, the `$LOOP_PREV_OUTPUT` and `$LOOP_USER_INPUT` variables, and the patterns used in Archon's own bundled workflows.
+
+## Quick start
+
+```yaml .archon/workflows/iterate-until-done.yaml
+name: iterate-until-done
+description: Implement stories from a PRD one at a time
+
+nodes:
+  - id: setup
+    bash: |
+      echo "Branch: $(git branch --show-current)"
+      cat .archon/prd.md
+
+  - id: implement
+    depends_on: [setup]
+    loop:
+      prompt: |
+        You are in a FRESH session — no memory of previous iterations.
+
+        Setup context:
+        $setup.output
+
+        User request: $USER_MESSAGE
+
+        Read the PRD tracking file to find the next unfinished story.
+        Implement it, validate, commit, update the tracking file.
+
+        When all stories are done: <promise>COMPLETE</promise>
+      until: COMPLETE
+      max_iterations: 15
+      fresh_context: true
+
+  - id: report
+    depends_on: [implement]
+    prompt: "Summarize what was implemented: $implement.output"
+```
+
+## How it works
+
+A loop node iterates until one of these conditions is met:
+
+1. **LLM completion signal** — the AI outputs `<promise>SIGNAL</promise>` where SIGNAL matches the `until` value
+2. **Deterministic bash check** — an optional `until_bash` script exits with code 0
+3. **Max iterations reached** — the node **fails** with a clear error
+
+Between iterations, the executor checks for workflow cancellation. A loop node's `$nodeId.output` is the **last iteration's output only**—not a concatenation across all iterations.
+
+## Configuration fields
+
+```yaml
+- id: my-loop
+  loop:
+    prompt: "..."            # Required. The prompt sent each iteration.
+    until: COMPLETE          # Required. Completion signal string.
+    max_iterations: 10       # Required. Hard limit — node fails if exceeded.
+    fresh_context: true      # Optional. Default: false.
+    until_bash: "bun test"   # Optional. Bash exit 0 = complete.
+    interactive: true        # Optional. Pause for user input after each iteration.
+    gate_message: "..."      # Required when interactive: true.
+```
+
+### `prompt`
+
+The prompt sent to the AI each iteration. Supports all standard variable substitution plus loop-specific variables:
+
+| Variable | Value |
+|----------|-------|
+| `$ARGUMENTS` / `$USER_MESSAGE` | Original user message |
+| `$ARTIFACTS_DIR` | Workflow artifacts directory |
+| `$BASE_BRANCH` | Repository base branch |
+| `$WORKFLOW_ID` | Current workflow run ID |
+| `$nodeId.output` | Output from upstream (non-loop) nodes |
+| `$LOOP_USER_INPUT` | User feedback from an interactive gate pause |
+| `$LOOP_PREV_OUTPUT` | Cleaned output of the previous loop iteration (empty on first iteration) |
+
+`$LOOP_PREV_OUTPUT` is particularly useful for `fresh_context: true` loops—the agent has no memory of prior iterations, so injecting the previous iteration's output lets it focus on what failed and why without carrying the full session history.
+
+### `until`
+
+The completion signal string. The executor checks each iteration's output for:
+
+1. **Tag format (recommended):** `<promise>COMPLETE</promise>` — case-insensitive, whitespace-tolerant. Prevents false positives from the AI mentioning the signal word in prose.
+2. **Plain signal (fallback):** The signal at the very end of output (trailing whitespace and punctuation tolerated) or on its own line.
+
+`<promise>` tags are automatically stripped from output sent to the user and to downstream nodes.
+
+### `max_iterations`
+
+Hard safety limit. If the loop reaches this count without a completion signal, the **node fails** (not succeeds). Choose based on work scope:
+
+| Work type | Suggested range |
+|-----------|----------------|
+| Simple refinement / fix loop | 3–5 |
+| Multi-story implementation | 10–15 |
+| Long-running autonomous agent | 15–20 |
+
+### `fresh_context`
+
+Controls session continuity between iterations:
+
+| Value | Behavior | Use when |
+|-------|----------|----------|
+| `true` | Each iteration starts a fresh AI session. No memory of prior iterations. | Work state lives on disk. Prevents context window exhaustion on long loops. |
+| `false` (default) | Sessions thread — each iteration resumes the prior conversation. | Iterative refinement where the agent needs to remember what it tried before. |
+
+The first iteration is always fresh regardless of this setting.
+
+### `until_bash`
+
+Optional bash script executed after each AI iteration. If it exits with code 0, the loop completes—even if the AI didn't emit the completion signal:
+
+```yaml
+loop:
+  prompt: "Fix the failing tests"
+  until: ALL_PASS
+  max_iterations: 5
+  until_bash: "bun run test"   # Loop ends when tests pass
+```
+
+Useful for deterministic completion criteria: test suites, lint checks, build success. Supports the same variable substitution as `prompt`.
+
+### `interactive` and `gate_message`
+
+Set `interactive: true` to pause the loop between iterations and wait for human input. After each non-completing iteration, the executor:
+
+1. Sends the `gate_message` to the user along with the run ID and a `/workflow approve` command
+2. Pauses the workflow run
+3. Waits for the user to run `/workflow approve <id> <feedback>`
+
+The user's feedback is injected into the next iteration's prompt via `$LOOP_USER_INPUT`.
+
+<Warning>
+Interactive loop nodes require `interactive: true` at the **workflow level** as well. If only the loop node has `interactive: true`, a loader warning is emitted and the workflow will not pause correctly in web background mode.
+</Warning>
+
+```yaml
+name: guided-refine
+description: Refine output with human review between iterations
+interactive: true           # Required at workflow level
+
+nodes:
+  - id: refine
+    loop:
+      prompt: |
+        Review the current draft and improve it based on this feedback: $LOOP_USER_INPUT
+        When the output is satisfactory: <promise>DONE</promise>
+      until: DONE
+      max_iterations: 5
+      interactive: true
+      gate_message: "Review the output above. Provide feedback or type DONE to finish."
+```
+
+## Patterns
+
+### Stateless agent (Ralph pattern)
+
+Each iteration reads state from disk, does one unit of work, writes state back. The prompt explicitly tells the agent it has no memory:
+
+```yaml
+- id: implement
+  depends_on: [setup]
+  idle_timeout: 600000
+  loop:
+    prompt: |
+      You are in a FRESH session — no memory of previous iterations.
+
+      Project context:
+      $setup.output
+
+      Read the plan at `$ARTIFACTS_DIR/plan.md`.
+      Read the progress tracking at `$ARTIFACTS_DIR/progress.txt`.
+
+      Identify the next incomplete task. Implement it, validate with
+      `bun run validate`, commit, update progress tracking.
+
+      When ALL tasks are complete: <promise>COMPLETE</promise>
+    until: COMPLETE
+    max_iterations: 15
+    fresh_context: true
+```
+
+**When to use:** Multi-story implementation, long-running tasks where context window exhaustion is a risk. The agent reads tracking files to know what's done and what's next.
+
+### Retry-on-failure with `$LOOP_PREV_OUTPUT`
+
+When `fresh_context: true` is needed but the agent benefits from knowing what the previous pass said—typical of implement→validate or generate→review loops:
+
+```yaml
+- id: implement-and-qa
+  loop:
+    prompt: |
+      Implement the plan, then run `bun run validate`.
+      Fix any failures.
+
+      Previous iteration output (empty on first pass):
+      $LOOP_PREV_OUTPUT
+
+      Use the above to focus your fixes. When all checks pass:
+      <promise>QA_PASS</promise>
+    until: QA_PASS
+    fresh_context: true
+    max_iterations: 3
+```
+
+On the first iteration, `$LOOP_PREV_OUTPUT` is an empty string. Iterations 2+ receive the previous iteration's cleaned output (with `<promise>` tags stripped).
+
+### Accumulating context
+
+For iterative refinement where the agent needs to remember what it tried before:
+
+```yaml
+- id: refine
+  loop:
+    prompt: |
+      Review the current implementation and improve it.
+      Run validation after each change.
+      When validation passes with zero issues: <promise>DONE</promise>
+    until: DONE
+    max_iterations: 5
+    fresh_context: false   # Sessions thread — agent remembers prior iterations
+```
+
+**When to use:** Fix-iterate cycles, design refinement, TDD cycles.
+
+### Deterministic exit with `until_bash`
+
+Combine LLM work with a deterministic completion check to prevent false claims of completion:
+
+```yaml
+- id: fix-tests
+  loop:
+    prompt: |
+      Run the test suite. Read the failures. Fix them one at a time.
+      If all tests pass: <promise>TESTS_PASS</promise>
+    until: TESTS_PASS
+    max_iterations: 8
+    until_bash: "bun run test"   # Ends loop when tests actually pass
+    fresh_context: false
+```
+
+The loop ends when either the AI signals completion or the bash check exits 0—whichever comes first.
+
+### Interactive PIV loop (from bundled `archon-piv-loop`)
+
+The bundled `archon-piv-loop` workflow uses interactive loops for explore, plan refinement, and validation phases. Here is the explore phase:
+
+```yaml .archon/workflows/defaults/archon-piv-loop.yaml
+name: archon-piv-loop
+interactive: true            # Required for interactive loops in web
+
+nodes:
+  - id: explore
+    loop:
+      prompt: |
+        **User's request**: $ARGUMENTS
+        **User's latest input**: $LOOP_USER_INPUT
+
+        [Exploration instructions...]
+
+        NEVER emit <promise>PLAN_READY</promise> unless the user's LATEST
+        message contains an EXPLICIT phrase like "ready", "create the plan",
+        "let's go", or "proceed".
+      until: PLAN_READY
+      max_iterations: 15
+      interactive: true
+      gate_message: |
+        Answer the questions above, ask me to explore specific areas,
+        or say "ready" when you're satisfied with the exploration.
+
+  - id: create-plan
+    model: sonnet
+    depends_on: [explore]
+    context: fresh
+    prompt: |
+      Create a structured implementation plan from the exploration.
+      Final exploration summary: $explore.output
+      [...]
+
+  - id: refine-plan
+    depends_on: [create-plan]
+    loop:
+      prompt: |
+        **User's feedback**: $LOOP_USER_INPUT
+        [Plan refinement instructions...]
+        If user EXPLICITLY approved: <promise>PLAN_APPROVED</promise>
+      until: PLAN_APPROVED
+      max_iterations: 10
+      interactive: true
+      gate_message: |
+        Review the plan. Provide feedback or say "approved" to begin implementation.
+```
+
+### Implementation loop with `$implement-setup.output`
+
+From the same PIV workflow, the implementation phase shows how to pass upstream bash node output into a fresh-context loop:
+
+```yaml
+- id: implement-setup
+  depends_on: [refine-plan]
+  bash: |
+    echo "BRANCH=$(git branch --show-current)"
+    echo "PLAN_FILE=$ARTIFACTS_DIR/plan.md"
+    cat "$ARTIFACTS_DIR/plan.md"
+
+- id: implement
+  depends_on: [implement-setup]
+  idle_timeout: 600000
+  model: claude-opus-4-6[1m]
+  loop:
+    prompt: |
+      You are an autonomous coding agent in a FRESH session.
+      Your job: Read the plan, implement ONE task, validate, commit, exit.
+
+      Setup context:
+      $implement-setup.output
+
+      Re-read the plan file from disk (path is in the context above).
+      Find the next incomplete task. Implement, validate, commit, update progress.
+
+      When ALL tasks are complete: <promise>COMPLETE</promise>
+    until: COMPLETE
+    max_iterations: 15
+    fresh_context: true
+```
+
+## What is NOT supported on loop nodes
+
+<Warning>
+These fields are silently discarded at parse time with a loader warning. `retry:` is the exception—it causes a hard load error and the workflow will not load.
+</Warning>
+
+| Unsupported field | Notes |
+|-------------------|-------|
+| `retry` | Rejected at parse time — workflow fails to load |
+| `context: fresh` | Silently ignored — use `fresh_context` inside the `loop:` config instead |
+| `hooks` | Per-node SDK hooks not passed through to iterations |
+| `mcp` | Per-node MCP server configs not loaded for loop iterations |
+| `skills` | Skill preloading not applied to loop iterations |
+| `allowed_tools` / `denied_tools` | Tool restrictions not enforced on loop iterations |
+| `output_format` | Structured JSON output not supported |
+
+`provider` and `model` are accepted and forwarded to the loop executor—they set the provider/model for each iteration.
+
+If you need hooks, MCP, skills, or tool restrictions, use a `command:` node that wraps the iterative logic in a command file.
+
+## Output and data flow
+
+A loop node's `$nodeId.output` is the **last iteration's output only**—not a concatenation of all iterations.
+
+To accumulate results across iterations, write them to files in `$ARTIFACTS_DIR` and have the downstream node read from there:
+
+```yaml
+- id: implement
+  loop:
+    prompt: |
+      [...]
+      After each task, append to `$ARTIFACTS_DIR/progress.txt`.
+      When done: <promise>COMPLETE</promise>
+    until: COMPLETE
+    max_iterations: 15
+    fresh_context: true
+
+- id: summarize
+  depends_on: [implement]
+  bash: "cat $ARTIFACTS_DIR/progress.txt"  # Read accumulated results
+```
+
+## Error handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Iteration throws an error | Node fails immediately — no more iterations |
+| Max iterations exceeded | Node fails with descriptive error |
+| Workflow cancelled | Detected between iterations — node stops cleanly |
+| `idle_timeout` reached during iteration | Iteration completes with whatever output was collected; loop continues |
+| `retry:` set on loop node | Workflow fails to load at parse time |
+
+## Interactive loop vs approval with `on_reject`
+
+Both primitives handle human-in-the-loop iteration. Choose based on your pattern:
+
+| | Interactive loop | Approval + `on_reject` |
+|---|---|---|
+| YAML key | `loop.interactive: true` | `approval.on_reject: { prompt }` |
+| User input variable | `$LOOP_USER_INPUT` | `$REJECTION_REASON` |
+| Best for | **Conversational iteration** — explore, refine, review cycles | **Gate-then-fix** — approve to proceed, or reject to trigger a specific corrective action |
+| Completion signal | AI detects user intent in output | User explicitly approves or rejects via button/command |
+
+**Rule of thumb:** If the human and AI are having a conversation (exploring, refining, iterating), use an interactive loop. If the workflow should proceed unless the human objects, use an approval gate with `on_reject`.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Workflows" icon="git-branch" href="/guides/authoring-workflows">
+    Full workflow YAML reference including DAG, conditions, and retry.
+  </Card>
+  <Card title="Approval Nodes" icon="check-circle" href="/guides/approval-nodes">
+    Human-in-the-loop gates with approve/reject and `on_reject` rework.
+  </Card>
+  <Card title="Variable Reference" icon="variable" href="/reference/variables">
+    Complete list including `$LOOP_USER_INPUT`, `$LOOP_PREV_OUTPUT`, and `$REJECTION_REASON`.
+  </Card>
+  <Card title="Workflow Schema" icon="file-code" href="/reference/workflow-schema">
+    Full YAML schema including `loopNodeConfigSchema`.
+  </Card>
+</CardGroup>

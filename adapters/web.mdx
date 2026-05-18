@@ -1,0 +1,249 @@
+---
+title: "Archon Web UI: browser-based chat and workflow runner"
+description: "How to start the Archon Web UI, navigate its four main areas, run workflows, use the visual builder, and interact with the REST API directly."
+---
+
+The Archon Web UI is the built-in browser interface that ships with the server — no tokens, API keys, or external services required beyond what Archon itself needs. This page covers every part of the UI: starting the server, navigating the interface, running and monitoring workflows, building new workflows visually, and talking to the API directly via SSE or REST.
+
+## Prerequisites
+
+- Archon installed with dependencies resolved (`bun install`)
+- An Anthropic API key or Claude Code authentication — see [AI Assistants](/getting-started/ai-assistants)
+
+## Starting the Web UI
+
+<Steps>
+  <Step title="Development mode (recommended)">
+    Run both the backend API server and the Vite frontend together with hot reload:
+
+    ```bash
+    bun run dev
+    # Web UI: http://localhost:5173
+    # API server: http://localhost:3090
+    ```
+
+    You can also start each piece individually:
+
+    ```bash
+    # Backend API server only (port 3090)
+    bun run dev:server
+
+    # Frontend dev server only (port 5173, requires backend running)
+    bun run dev:web
+    ```
+  </Step>
+  <Step title="Production mode">
+    Build the frontend into static files and serve everything from a single port:
+
+    ```bash
+    bun run build   # Compile the frontend
+    bun run start   # Serve API + Web UI on port 3090
+    ```
+
+    In production mode the backend serves the compiled frontend at `http://localhost:3090` — there is no separate frontend URL.
+  </Step>
+  <Step title="Remote / homelab access">
+    The backend binds to `0.0.0.0` by default. The Vite dev server only listens on `localhost`. To expose the frontend on your network:
+
+    ```bash
+    bun run dev:web -- --host 0.0.0.0
+    ```
+
+    Then start the backend separately with `bun run dev:server`. The Web UI is reachable at `http://<server-ip>:5173`. Make sure your firewall allows ports `5173` and `3090`.
+  </Step>
+</Steps>
+
+<Tip>
+  In a Docker deployment or on a homelab you can also use `archon serve` from the compiled binary. It downloads the Web UI dist on first run and serves both the API and the static files on a single port.
+</Tip>
+
+## Interface overview
+
+The Web UI is a dark-themed single-page application split into four main areas.
+
+<CardGroup cols={2}>
+  <Card title="Left sidebar" icon="sidebar">
+    Conversations list, project selector, and the workflow invoker quick-launch panel.
+  </Card>
+  <Card title="Main chat area" icon="message-square">
+    Real-time streaming chat with the AI assistant, including collapsible tool-call cards.
+  </Card>
+  <Card title="Command Center" icon="layout-dashboard" href="/adapters/web#command-center-dashboard">
+    Live workflow monitor at `/dashboard` — status summary, run cards, and approval actions.
+  </Card>
+  <Card title="Settings" icon="settings">
+    Configure assistant defaults and manage registered projects at `/settings`.
+  </Card>
+</CardGroup>
+
+### Left sidebar
+
+- **Conversations list** — all your conversations, searchable and grouped by project. Click to switch; right-click or hover for rename/delete.
+- **Project selector** — registered codebases appear here. Select a project to scope conversations and workflows to that repository. Register new projects with the **+** button (clone from URL or register a local path).
+- **Workflow invoker** — select a workflow from the dropdown, type a message, and click **Run** to create a new conversation and start the workflow in one action.
+
+### Main chat area
+
+The center of the screen is the standard chat interface. AI responses stream in real time. When the assistant uses tools (reading files, running commands, editing code), each tool call appears as a collapsible card showing the tool name, input arguments, and output. A lock indicator appears while the agent is actively working.
+
+## Chat interface
+
+### Creating conversations
+
+Click **New Chat** in the sidebar, or use the workflow invoker to create a conversation that immediately starts a workflow. Each conversation gets a unique ID and persists across page refreshes.
+
+If a project is selected in the sidebar, new conversations are automatically scoped to that codebase.
+
+### Sending messages
+
+Type in the message input at the bottom and press Enter (or click **Send**). Messages can be:
+
+- **Natural language** — the AI assistant responds conversationally, using tools to explore and modify code
+- **Slash commands** — `/status`, `/workflow list`, `/help`, and others, handled deterministically without AI
+- **Workflow triggers** — messages like "fix issue #42" or "review this PR" are routed to the appropriate workflow automatically
+
+### Connection status
+
+A status indicator shows whether the SSE connection to the backend is active. If you see "disconnected", verify the backend is running and refresh the page.
+
+## Workflow execution
+
+### Three ways to run a workflow
+
+1. **Sidebar workflow invoker** — select a workflow, type a message, and click **Run**
+2. **Chat message** — describe what you want; the router picks the right workflow automatically
+3. **Slash command** — `/workflow run <name> <message>` for explicit invocation
+
+### Foreground vs background execution
+
+By default, workflows run in the background — a progress card appears in the conversation while the workflow executes in a separate worker. You can continue chatting or start other workflows.
+
+Workflows with `interactive: true` in their YAML definition run in the foreground. This is required for workflows with approval gates or interactive loop nodes.
+
+### Workflow progress cards
+
+While a workflow runs, a progress card shows:
+
+- Current status (running, completed, failed, paused)
+- Which DAG node is currently executing
+- Per-node status indicators and elapsed time
+
+For paused workflows (approval gates), the progress card shows **Approve** and **Reject** buttons so you can control the workflow directly from chat.
+
+### Workflow result card
+
+When a workflow reaches a terminal state (completed, failed, or cancelled), the progress card is replaced by a result card showing:
+
+- Status icon and header
+- Node count (e.g. `3/4 nodes`)
+- Total duration
+- Artifacts — any files produced, with direct links
+
+Click the arrow button in the result card header to open the full execution detail page.
+
+## Command Center (dashboard)
+
+Accessible at `/dashboard`, the Command Center shows all workflow runs across your projects in real time via a dedicated SSE stream.
+
+| Element | Description |
+|---------|-------------|
+| Status summary bar | Counts of running, completed, failed, and paused runs |
+| Workflow run cards | Status, name, elapsed time, and node progress for each run |
+| Actions | Resume, cancel, abandon, approve, or reject runs |
+| History table | Paginated list of past runs with date range filtering |
+
+## Workflow Builder
+
+The visual editor at `/workflows/builder` lets you create and modify workflow YAML files without hand-editing.
+
+- **DAG canvas** — drag-and-drop nodes to build your workflow graph visually
+- **Node palette** — drag command, prompt, and bash nodes from the sidebar; additional node types (script, loop, approval, cancel) are editable in Code / Split view
+- **Node inspector** — click a node to configure its properties in a tabbed panel
+- **View modes** — toggle between Visual, Split (canvas + YAML side by side), and Code views
+- **Validation panel** — real-time feedback as you build
+- **Undo/redo** — full undo/redo stack with keyboard shortcuts (`Ctrl+Z` / `Ctrl+Shift+Z`)
+- **Save** — writes the workflow YAML to your project's `.archon/workflows/` directory
+
+Browse existing workflows at `/workflows` and open any of them in the builder to edit.
+
+## SSE streaming
+
+The Web UI uses Server-Sent Events (SSE) for real-time communication. When you open a conversation the frontend opens a persistent connection to `/api/stream/:conversationId`.
+
+| Event type | Description |
+|------------|-------------|
+| `text` | AI response text (batched for performance) |
+| `tool_call` | Tool invocation with arguments |
+| `tool_result` | Tool execution result |
+| `workflow_step` | Workflow node status change |
+| `workflow_status` | Overall workflow run status update |
+| `workflow_dispatch` | Workflow started for this conversation |
+| `dag_node` | DAG node progress update |
+| `workflow_artifact` | Artifact produced by a workflow |
+| `conversation_lock` | Lock/unlock indicator |
+| `session_info` | Session metadata |
+| `error` | Error message |
+| `heartbeat` | Keep-alive signal |
+
+A separate dashboard stream at `/api/stream/__dashboard__` multiplexes workflow events across all conversations to power the Command Center's live updates.
+
+## Using the REST API directly
+
+You can drive Archon without the Web UI. The API server runs on port `3090` (or whichever port you configure).
+
+```bash
+# Create a conversation
+curl -X POST http://localhost:3090/api/conversations \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Send a message
+curl -X POST http://localhost:3090/api/conversations/<conversationId>/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/status"}'
+
+# Poll for messages
+curl http://localhost:3090/api/conversations/<conversationId>/messages
+
+# Stream events (SSE)
+curl -N http://localhost:3090/api/stream/<conversationId>
+```
+
+The machine-readable OpenAPI spec is available at `GET /api/openapi.json`. See the [API Reference](/reference/api) for the full endpoint list.
+
+## Managing projects
+
+### Registering a project
+
+1. Click **+** in the sidebar or go to **Settings → Projects**
+2. Enter a GitHub URL or a local path
+   - Inputs starting with `https://`, `ssh://`, `git@`, or `git://` are treated as remote URLs and cloned
+   - Everything else is treated as a local path and registered in place
+3. The codebase appears in the project selector
+
+Alternatively, use the API: `POST /api/codebases` with a `url` field (clone) or a `path` field (local).
+
+### Switching projects
+
+Click a project in the sidebar to scope your conversations and workflows. The selected project determines which `.archon/commands/` and `.archon/workflows/` are loaded, the working directory for AI tool execution, and which isolation environments are shown.
+
+### Removing a project
+
+Hover over a project in the sidebar and click the delete icon, or `DELETE /api/codebases/:id`. This removes the registration but does not delete cloned files.
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Authoring workflows" icon="workflow" href="/guides/authoring-workflows">
+    Create custom multi-step workflows with the YAML format.
+  </Card>
+  <Card title="API reference" icon="code" href="/reference/api">
+    Full REST API documentation for every endpoint.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/reference/configuration">
+    Customize Archon defaults and per-project settings.
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment/docker">
+    Run Archon with Docker for persistent, production-ready hosting.
+  </Card>
+</CardGroup>

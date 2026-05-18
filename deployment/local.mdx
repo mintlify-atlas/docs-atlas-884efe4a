@@ -1,0 +1,355 @@
+---
+title: "Local Development Setup: Run Archon from Source with Bun"
+description: "Clone Archon, install dependencies with Bun, start the dev server with hot reload, configure SQLite or PostgreSQL, and run the CLI without a server."
+---
+
+Archon is a Bun monorepo that runs TypeScript directly — no compile step required. This page covers the full local development setup: prerequisites (Bun, Claude Code, gh CLI), cloning the repo, `bun install`, starting the dev server with hot reload, database options, port configuration, and how to run the CLI standalone without starting the server.
+
+<Info>
+If you want to run Archon in a container locally rather than from source, see the [Docker guide](/deployment/docker). For a cloud VPS deployment, see the [Cloud guide](/deployment/cloud).
+</Info>
+
+---
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Bun 1.0+" icon="bolt" href="https://bun.sh">
+    Archon uses Bun as its runtime and package manager. Install from bun.sh.
+  </Card>
+  <Card title="Claude Code or Codex" icon="robot" href="/getting-started/ai-assistants">
+    Archon orchestrates AI assistants — it does not bundle them. Install at least one separately.
+  </Card>
+  <Card title="gh CLI" icon="github" href="https://cli.github.com">
+    The GitHub CLI is used for repository operations and GitHub adapter webhooks.
+  </Card>
+  <Card title="Git" icon="code-branch" href="https://git-scm.com">
+    Required for worktree isolation. Most systems have it; verify with `git --version`.
+  </Card>
+</CardGroup>
+
+### Install Bun
+
+```bash
+# macOS and Linux
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (PowerShell)
+irm https://bun.sh/install.ps1 | iex
+
+# Verify
+bun --version
+```
+
+### Install Claude Code
+
+```bash
+# macOS/Linux (Anthropic's recommended native installer)
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Windows (PowerShell)
+irm https://claude.ai/install.ps1 | iex
+
+# Authenticate
+claude /login
+```
+
+<Note>
+Source builds (`bun run dev`) auto-resolve Claude Code's `cli.js` via `node_modules` — you do not need to set `CLAUDE_BIN_PATH`. That variable is only required for compiled Archon binaries.
+</Note>
+
+---
+
+## Setup
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/coleam00/Archon.git
+    cd Archon
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    bun install
+    ```
+
+    This installs all workspace packages across the monorepo in one step. The lockfile (`bun.lock`) pins all versions.
+  </Step>
+
+  <Step title="Configure environment">
+    ```bash
+    cp .env.example .env
+    ```
+
+    Open `.env` and add your AI credentials. The minimum required:
+
+    ```ini .env
+    # Choose one authentication method for Claude:
+
+    # Option A — global auth from `claude /login` (recommended for source builds)
+    CLAUDE_USE_GLOBAL_AUTH=true
+
+    # Option B — OAuth token (run `claude setup-token` locally)
+    # CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+
+    # Option C — API key
+    # CLAUDE_API_KEY=sk-ant-xxxxx
+
+    # GitHub token (for repository operations)
+    GH_TOKEN=ghp_your_token_here
+    GITHUB_TOKEN=ghp_your_token_here
+    ```
+  </Step>
+
+  <Step title="Start the development server">
+    ```bash
+    bun run dev
+    ```
+
+    This starts both the backend API server and the Vite frontend dev server simultaneously with hot reload:
+
+    | Service | URL | Description |
+    |---------|-----|-------------|
+    | Web UI | http://localhost:5173 | React frontend (Vite dev server) |
+    | API server | http://localhost:3090 | Backend API + SSE streaming |
+
+    SQLite is the default database — no additional setup is needed. The database is auto-initialized at `~/.archon/archon.db` on first start.
+  </Step>
+
+  <Step title="Verify it works">
+    ```bash
+    curl http://localhost:3090/health
+    # {"status":"ok"}
+    ```
+
+    Open http://localhost:5173 in your browser to access the Web UI.
+  </Step>
+</Steps>
+
+---
+
+## Running individual packages
+
+You can start the backend and frontend independently:
+
+```bash
+bun run dev:server   # Backend only (port 3090)
+bun run dev:web      # Frontend only (port 5173)
+```
+
+This is useful when debugging a specific layer or when you want the backend logs without the Vite output mixed in.
+
+---
+
+## Database options
+
+SQLite is the default and requires zero configuration. Switch to PostgreSQL when you need parallel access, heavier workloads, or want a cloud-compatible setup.
+
+| Option | Setup | Best for |
+|--------|-------|----------|
+| **SQLite** (default) | Zero config — omit `DATABASE_URL` | Single-user, local development |
+| **Remote PostgreSQL** | Set `DATABASE_URL` to a hosted connection string | Cloud deployments, shared access |
+| **Local PostgreSQL** | Docker `--profile with-db` | Self-hosted, Docker-based setups |
+
+SQLite stores data at `~/.archon/archon.db`. It is auto-initialized on first run.
+
+### Use PostgreSQL locally (optional)
+
+Start the PostgreSQL container from the repo root:
+
+```bash
+docker compose --profile with-db up -d postgres
+```
+
+Then add to `.env`:
+
+```ini .env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/remote_coding_agent
+```
+
+<Note>
+The database schema is created automatically on first container startup via the mounted migration file. No manual `psql` step is needed for fresh installs.
+</Note>
+
+Restart the dev server after changing `DATABASE_URL` so the new value is picked up.
+
+---
+
+## Port configuration
+
+| Context | Default port | Notes |
+|---------|-------------|-------|
+| `bun run dev` | 3090 | API server default |
+| Vite frontend | 5173 | Dev server only |
+| Docker | 3000 | Set via `PORT` in `.env` |
+| Worktrees | 3190–4089 | Auto-allocated, hash-based on path |
+
+To override the API server port:
+
+```bash
+PORT=4000 bun run dev
+```
+
+<Tip>
+The port difference between local dev (3090) and Docker (3000) is intentional. When running in a git worktree, Archon auto-allocates a unique port in the 3190–4089 range based on the worktree path, so multiple worktrees never collide.
+</Tip>
+
+---
+
+## Health endpoints
+
+| Context | Endpoint | Notes |
+|---------|----------|-------|
+| Local dev | `/health` | Convenience alias |
+| Local dev | `/api/health` | Also supported |
+| Docker | `/api/health` | Used by Docker healthcheck |
+
+```bash
+curl http://localhost:3090/health           # Local dev
+curl http://localhost:3090/api/health
+curl http://localhost:3090/health/db        # Database connectivity
+curl http://localhost:3090/health/concurrency  # Concurrency status
+```
+
+---
+
+## Hot reload behavior
+
+`bun run dev` uses Bun's built-in file watcher. When you edit a source file:
+
+- **Backend** (`packages/server/`, `packages/core/`, etc.) — the API server restarts automatically. Active SSE connections drop and reconnect.
+- **Frontend** (`packages/web/src/`) — Vite applies hot module replacement (HMR) without a full page reload for most changes. Component state is preserved where possible.
+
+---
+
+## Running the CLI without a server
+
+The Archon CLI (`bun run cli`) runs workflows directly from your terminal without starting the HTTP server. This is useful for scripting, quick one-off tasks, and testing workflow definitions.
+
+The CLI requires a git repository as its working context (workflows use worktree isolation by default):
+
+```bash
+# List available workflows
+bun run cli workflow list
+
+# Run a workflow
+bun run cli workflow run assist "What does the orchestrator do?"
+
+# Run in a specific directory
+bun run cli workflow run plan --cwd /path/to/repo "Add dark mode"
+
+# Run without worktree isolation (live checkout)
+bun run cli workflow run quick-fix --no-worktree "Fix typo"
+
+# Show running workflows
+bun run cli workflow status
+
+# Start the Web UI server (CLI-only mode, no hot reload)
+bun run cli serve
+bun run cli serve --port 4000
+```
+
+Run `bun run cli --help` to see all available commands.
+
+---
+
+## Production build (local)
+
+To run a production build locally — the compiled frontend served by the Bun backend on a single port:
+
+```bash
+bun run build    # Builds packages/web/dist/ with Vite
+bun run start    # Starts the API server at port 3090, serves the built Web UI
+```
+
+The production build is equivalent to the Docker image: one process, one port, no Vite dev server.
+
+---
+
+## Regenerating frontend API types
+
+The frontend uses generated TypeScript types derived from the OpenAPI spec. After changing API routes, regenerate with:
+
+```bash
+bun run dev:server   # Must be running first (port 3090)
+bun --filter @archon/web generate:types
+```
+
+The generated file is at `packages/web/src/lib/api.generated.d.ts`.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Port already in use">
+    ```bash
+    # macOS/Linux
+    lsof -i :3090
+
+    # Windows
+    netstat -ano | findstr :3090
+    ```
+
+    Either stop the conflicting process or set `PORT=4000 bun run dev`.
+  </Accordion>
+
+  <Accordion title="Claude Code not found">
+    Source builds resolve Claude Code's `cli.js` from `node_modules` automatically. If you see a "Claude binary not found" error after `bun install`, verify Claude Code is installed:
+
+    ```bash
+    which claude
+    claude --version
+    ```
+
+    If using a custom install path, set `CLAUDE_BIN_PATH` in `.env` or `assistants.claude.claudeBinaryPath` in `~/.archon/config.yaml`.
+  </Accordion>
+
+  <Accordion title="Database not initializing">
+    SQLite auto-initializes on first run. If you see schema errors, delete the database file and restart:
+
+    ```bash
+    rm ~/.archon/archon.db
+    bun run dev
+    ```
+
+    For PostgreSQL, run the combined migration manually:
+
+    ```bash
+    psql $DATABASE_URL < migrations/000_combined.sql
+    ```
+  </Accordion>
+
+  <Accordion title="Container won't start (Docker local)">
+    ```bash
+    docker compose logs app
+    docker compose config        # Verify .env interpolation
+    docker compose build --no-cache && docker compose up -d
+    ```
+  </Accordion>
+
+  <Accordion title="Bun workspace symlink errors on Windows">
+    Build and run from WSL, not PowerShell. Docker Desktop on Windows cannot follow Bun workspace symlinks during the build context transfer. Open a WSL terminal and run from there.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Docker deployment" icon="docker" href="/deployment/docker">
+    Package Archon in Docker for consistent, portable deployments.
+  </Card>
+  <Card title="Cloud deployment" icon="cloud" href="/deployment/cloud">
+    Deploy to a VPS with Caddy HTTPS for always-on access.
+  </Card>
+  <Card title="AI assistants" icon="robot" href="/getting-started/ai-assistants">
+    Configure Claude, Codex, or Pi as your AI provider.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config file options.
+  </Card>
+</CardGroup>

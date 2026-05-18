@@ -1,0 +1,588 @@
+---
+title: "Creating YAML Workflows: A Complete Authoring Guide"
+description: "Build multi-node DAG workflows in Archon using YAML. Covers all node types, parallel execution, conditional branching, and output substitution with examples."
+---
+
+Archon workflows are YAML files that define a directed acyclic graph (DAG) of nodes—each representing an AI agent call, a shell script, a loop, or a human approval gate. This page covers everything you need to author, test, and run production-quality workflows: the full schema, every node type, conditional branching with `when:`, structured output via `output_format`, DAG resume, and the patterns used in Archon's own bundled workflows.
+
+<Note>
+Read [Authoring Commands](/guides/authoring-commands) first. Workflows are built from command files; understanding how commands work will make your workflows more effective.
+</Note>
+
+## What is a workflow?
+
+A workflow is a `.yaml` file in `.archon/workflows/` that orchestrates multiple AI agents and scripts into a repeatable pipeline. Workflows enable:
+
+<CardGroup cols={2}>
+  <Card title="Multi-step automation" icon="link-2">
+    Chain AI agents together—investigate, implement, review, and create a PR in one run.
+  </Card>
+  <Card title="Parallel execution" icon="git-fork">
+    Independent nodes in the same topological layer run concurrently via `Promise.allSettled`.
+  </Card>
+  <Card title="Conditional branching" icon="git-branch">
+    Use `when:` conditions and `output_format` to route to different paths based on AI output.
+  </Card>
+  <Card title="Iterative loops" icon="refresh-cw">
+    `loop:` nodes repeat until a completion signal, enabling autonomous multi-step work.
+  </Card>
+</CardGroup>
+
+## File location
+
+Workflows live in `.archon/workflows/` relative to your working directory. Subdirectories work—Archon discovers workflows recursively.
+
+```
+.archon/
+├── workflows/
+│   ├── my-workflow.yaml
+│   └── review/
+│       └── full-review.yaml   # Subdirectory works
+└── commands/
+    └── [commands used by workflows]
+```
+
+<Tip>
+Browse `.archon/workflows/defaults/` for real-world examples—Archon ships 12 bundled workflows. Copy and modify them: `cp .archon/workflows/defaults/archon-fix-github-issue.yaml .archon/workflows/my-fix-issue.yaml`. Same-named files in `.archon/workflows/` override the bundled defaults.
+</Tip>
+
+<Info>
+**CLI vs Server:** The CLI reads workflow files from wherever you run it and sees uncommitted changes. The server reads from `~/.archon/workspaces/owner/repo/`, which only syncs from remote before worktree creation—push your changes for the server to pick them up.
+</Info>
+
+## Full workflow schema
+
+```yaml .archon/workflows/my-workflow.yaml
+# Required
+name: workflow-name
+description: |
+  What this workflow does.
+
+# Optional workflow-level configuration
+provider: claude                 # Any registered provider (claude, codex, pi)
+model: sonnet                    # Model override
+interactive: true                # Web only: run in foreground (required for approval gates)
+worktree:
+  enabled: false                 # false = always run in live checkout; true = require worktree
+tags: [Review, Triage]           # Explicit Web UI filter tags
+
+# Claude SDK defaults (inherited by all Claude nodes unless overridden per-node)
+effort: high                     # 'low' | 'medium' | 'high' | 'max'
+thinking: adaptive               # 'adaptive' | 'disabled' | { type: enabled, budgetTokens: N }
+fallbackModel: claude-haiku-4-5
+betas: ['context-1m-2025-08-07']
+sandbox:
+  enabled: true
+
+# Required: DAG nodes
+nodes:
+  - id: classify                  # Unique node ID — used in depends_on and $id.output
+    command: classify-issue        # Loads .archon/commands/classify-issue.md
+    output_format:                 # Structured JSON output (SDK-enforced on Claude/Codex)
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [BUG, FEATURE]
+      required: [type]
+
+  - id: investigate
+    command: investigate-bug
+    depends_on: [classify]         # Wait for classify to complete first
+    when: "$classify.output.type == 'BUG'"   # Skip if condition is false
+    context: fresh                 # Start a fresh AI session for this node
+
+  - id: plan
+    command: plan-feature
+    depends_on: [classify]
+    when: "$classify.output.type == 'FEATURE'"
+
+  - id: implement
+    command: implement-changes
+    depends_on: [investigate, plan]
+    trigger_rule: none_failed_min_one_success  # Run if at least one dep succeeded
+    provider: claude               # Per-node provider override
+    model: opus[1m]                # Per-node model override
+
+  - id: summarize
+    prompt: "Summarize the changes in $implement.output"   # Inline prompt
+    depends_on: [implement]
+    effort: low                    # Override workflow-level effort for this node
+```
+
+## Node types
+
+Every node must have exactly one of these mutually exclusive fields:
+
+<Tabs>
+  <Tab title="command">
+    Loads a markdown prompt file from `.archon/commands/`. This is the most common node type—it keeps prompts maintainable and reusable.
+
+    ```yaml
+    - id: investigate
+      command: investigate-issue     # Loads .archon/commands/investigate-issue.md
+      depends_on: [classify]
+      context: fresh
+    ```
+
+    See [Authoring Commands](/guides/authoring-commands) for how to write command files.
+  </Tab>
+  <Tab title="prompt">
+    An inline prompt string. Good for short, one-off prompts that don't warrant a separate file.
+
+    ```yaml
+    - id: summarize
+      prompt: |
+        Summarize the implementation described in:
+        $implement.output
+      depends_on: [implement]
+    ```
+  </Tab>
+  <Tab title="bash">
+    Runs a shell script without any AI. `stdout` is captured as `$nodeId.output`. Useful for deterministic data preparation, git operations, or environment setup.
+
+    ```yaml
+    - id: fetch-issue
+      bash: |
+        ISSUE_NUM=$(echo "$extract-issue-number.output" | tr -d "'\"\`\n " | grep -oE '[0-9]+' | head -1)
+        gh issue view "$ISSUE_NUM" --json title,body,labels,comments,state,url
+      depends_on: [extract-issue-number]
+      timeout: 30000   # Kill after 30 s (default: 120 000 ms)
+    ```
+  </Tab>
+  <Tab title="loop">
+    Iterative AI execution until a completion signal. See [Loop Nodes](/guides/loop-nodes) for the full reference.
+
+    ```yaml
+    - id: implement
+      loop:
+        prompt: |
+          Read the plan. Implement the next incomplete task. Validate. Commit.
+          When all tasks are done: <promise>COMPLETE</promise>
+        until: COMPLETE
+        max_iterations: 15
+        fresh_context: true
+    ```
+  </Tab>
+  <Tab title="approval">
+    Pauses the workflow for human review. See [Approval Nodes](/guides/approval-nodes) for the full reference.
+
+    ```yaml
+    - id: review-gate
+      approval:
+        message: "Review the proposed plan before implementation begins."
+        capture_response: true      # Store comment as $review-gate.output
+        on_reject:
+          prompt: "Revise the plan: $REJECTION_REASON"
+          max_attempts: 3
+      depends_on: [plan]
+    ```
+  </Tab>
+  <Tab title="script">
+    Runs TypeScript (via `bun`) or Python (via `uv`). `stdout` is captured as `$nodeId.output`. See [Script Nodes](/guides/script-nodes) for the full reference.
+
+    ```yaml
+    - id: classify
+      script: |
+        const severity = process.env.USER_MESSAGE?.includes('crash') ? 'high' : 'low';
+        console.log(JSON.stringify({ severity }));
+      runtime: bun
+    ```
+  </Tab>
+  <Tab title="cancel">
+    Terminates the workflow with a reason string. In-flight parallel nodes are stopped. The run status is set to `cancelled`, not `failed`.
+
+    ```yaml
+    - id: stop-if-blocked
+      cancel: "PR has merge conflicts — cannot proceed"
+      depends_on: [check]
+      when: "$check.output == 'blocked'"
+    ```
+  </Tab>
+</Tabs>
+
+## Common node fields
+
+These fields apply to all node types:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | required | Unique node identifier. Used in `depends_on`, `when:`, and `$id.output` |
+| `depends_on` | string[] | `[]` | Node IDs that must complete before this node runs |
+| `when` | string | — | Condition expression. Node is skipped if `false` |
+| `trigger_rule` | string | `all_success` | Join semantics when multiple upstreams exist |
+| `context` | `'fresh'` \| `'shared'` | — | `fresh` = new AI session; defaults to `fresh` for parallel layers |
+| `idle_timeout` | number | — | Kill node if idle for this many milliseconds |
+| `retry` | object | — | Per-node retry configuration |
+
+## AI node options
+
+These fields apply to `command` and `prompt` nodes (Claude only unless noted):
+
+| Field | Description |
+|-------|-------------|
+| `provider` | Per-node provider override: `'claude'`, `'codex'`, `'pi'` |
+| `model` | Per-node model override, forwarded verbatim to the SDK |
+| `output_format` | JSON Schema for structured output. SDK-enforced on Claude/Codex |
+| `allowed_tools` | Whitelist of built-in tools. `[]` = disable all tools. Claude only |
+| `denied_tools` | Remove specific tools. Applied after `allowed_tools`. Claude only |
+| `effort` | Reasoning depth: `'low'` \| `'medium'` \| `'high'` \| `'max'`. Claude only |
+| `thinking` | Extended thinking mode: `'adaptive'`, `'disabled'`, or `{type: 'enabled', budgetTokens: N}`. Claude only |
+| `maxBudgetUsd` | USD cost cap; node fails if exceeded. Claude only, per-node only |
+| `systemPrompt` | Override the default `claude_code` system prompt. Claude only, per-node only |
+| `fallbackModel` | Model to use if primary model fails. Claude only |
+| `mcp` | Path to MCP server config JSON file. Claude and Codex |
+| `skills` | Skills to preload into Claude nodes |
+| `hooks` | Per-node SDK hook callbacks. Claude only |
+| `agents` | Inline sub-agent definitions invokable via the `Task` tool. Claude only |
+
+## `trigger_rule` values
+
+| Value | Behavior |
+|-------|----------|
+| `all_success` | Run only if all upstream deps completed successfully (default) |
+| `one_success` | Run if at least one upstream dep completed successfully |
+| `none_failed_min_one_success` | Run if no deps failed AND at least one succeeded (skipped deps are ok) |
+| `all_done` | Run when all deps reach a terminal state (completed, failed, or skipped) |
+
+## `when:` condition syntax
+
+Conditions gate whether a node runs based on upstream node outputs.
+
+```yaml
+# String comparisons
+when: "$classify.output.type == 'BUG'"
+when: "$classify.output.type != 'FEATURE'"
+
+# Numeric comparisons (both sides must parse as numbers)
+when: "$score.output > '80'"
+when: "$score.output >= '0.9'"
+
+# JSON field access (for output_format nodes)
+when: "$classify.output.issue_type == 'bug'"
+
+# Compound expressions
+when: "$a.output == 'X' && $b.output != 'Y'"
+when: "$a.output == 'X' || $b.output == 'Y'"
+```
+
+<Warning>
+Conditions are fail-closed — invalid or unparseable expressions default to `false`, causing the node to be skipped with a warning. Parentheses are not supported; use standard AND/OR precedence.
+</Warning>
+
+## `$nodeId.output` substitution
+
+Reference the output of any completed upstream node in prompts, commands, and bash scripts:
+
+```yaml
+nodes:
+  - id: classify
+    command: classify-issue
+
+  - id: fix
+    prompt: |
+      Issue type: $classify.output.type
+      Full classification: $classify.output
+      
+      Now implement the fix.
+    depends_on: [classify]
+```
+
+Variable substitution order:
+1. Standard variables (`$WORKFLOW_ID`, `$USER_MESSAGE`, `$ARTIFACTS_DIR`, etc.)
+2. Node output references (`$nodeId.output`, `$nodeId.output.field`)
+
+## `output_format` for structured JSON
+
+Use `output_format` to enforce JSON output from an AI node. This enables reliable `when:` branching and dot-notation field access:
+
+```yaml
+- id: classify
+  command: classify-issue
+  output_format:
+    type: object
+    properties:
+      issue_type:
+        type: string
+        enum: ["bug", "feature", "enhancement"]
+      severity:
+        type: string
+        enum: ["low", "medium", "high"]
+    required: [issue_type]
+```
+
+- `$classify.output` — full JSON string
+- `$classify.output.issue_type` — field access
+- SDK-enforced on Claude and Codex; best-effort (prompt augmentation + extraction) on Pi
+
+## Variable reference
+
+| Variable | Description |
+|----------|-------------|
+| `$ARGUMENTS` / `$USER_MESSAGE` | The user's input that triggered the workflow |
+| `$WORKFLOW_ID` | Unique ID for this workflow run |
+| `$ARTIFACTS_DIR` | Pre-created artifacts directory for this run |
+| `$BASE_BRANCH` | Base branch (auto-detected or configured) |
+| `$DOCS_DIR` | Documentation directory (default: `docs/`) |
+| `$CONTEXT` | GitHub issue/PR context (if available) |
+| `$nodeId.output` | Output of a completed upstream node |
+| `$nodeId.output.field` | JSON field from a structured upstream node output |
+
+See the [Variable Reference](/reference/variables) for the complete list.
+
+## Retry configuration
+
+Every node auto-retries on transient errors (SDK crashes, rate limits, network timeouts) with 2 retries (3 total attempts) and 3 s base delay. Customize with a `retry:` block:
+
+```yaml
+- id: flaky-node
+  command: flaky-command
+  retry:
+    max_attempts: 3       # 3 retries = 4 total attempts
+    delay_ms: 5000        # Base delay, doubles each attempt
+    on_error: transient   # 'transient' (default) | 'all'
+```
+
+<Warning>
+`retry:` is not supported on `loop:` nodes—the loader will reject the workflow at parse time.
+</Warning>
+
+## DAG resume on failure
+
+When a workflow fails, the run stays in the database as a resume candidate. Resume is explicit—you opt in:
+
+```bash
+# Resume most recent failed run for this workflow + directory
+archon workflow run large-migration --resume
+
+# Target a specific run by ID
+archon workflow resume <run-id>
+```
+
+On resume, completed nodes are skipped and only failed/not-yet-run nodes execute.
+
+## Example: classify and route (from bundled `archon-fix-github-issue`)
+
+This excerpt from the bundled `archon-fix-github-issue` workflow shows classification with structured output, conditional routing, and a bridge node using `trigger_rule`:
+
+```yaml .archon/workflows/defaults/archon-fix-github-issue.yaml
+provider: claude
+model: sonnet
+
+nodes:
+  - id: classify
+    prompt: |
+      Analyze the GitHub issue and determine its type.
+      $fetch-issue.output
+    depends_on: [fetch-issue]
+    model: haiku
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        issue_type:
+          type: string
+          enum: ["bug", "feature", "enhancement", "refactor", "chore", "documentation"]
+        title:
+          type: string
+      required: [issue_type, title]
+
+  - id: investigate
+    command: archon-investigate-issue
+    depends_on: [classify, web-research]
+    when: "$classify.output.issue_type == 'bug'"
+    context: fresh
+
+  - id: plan
+    command: archon-create-plan
+    depends_on: [classify, web-research]
+    when: "$classify.output.issue_type != 'bug'"
+    context: fresh
+
+  - id: bridge-artifacts
+    bash: |
+      if [ -f "$ARTIFACTS_DIR/plan.md" ] && [ ! -f "$ARTIFACTS_DIR/investigation.md" ]; then
+        cp "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/investigation.md"
+      fi
+    depends_on: [investigate, plan]
+    trigger_rule: one_success
+
+  - id: implement
+    command: archon-fix-issue
+    depends_on: [bridge-artifacts]
+    context: fresh
+    model: opus[1m]
+```
+
+## Example: parallel review agents (from `archon-idea-to-pr`)
+
+Independent nodes in the same layer run concurrently. Here five review agents run in parallel after a shared setup:
+
+```yaml .archon/workflows/defaults/archon-idea-to-pr.yaml
+nodes:
+  - id: sync
+    command: archon-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+
+  # These five nodes all depend on 'sync' — they run concurrently
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success    # Synthesize even if some agents were skipped
+    context: fresh
+```
+
+## Example: human-in-the-loop with `approval`
+
+```yaml .archon/workflows/careful-refactor.yaml
+name: careful-refactor
+description: Refactor with human approval gate before execution
+interactive: true   # Required for Web UI: approval messages appear in chat
+
+nodes:
+  - id: propose
+    command: propose-refactor
+
+  - id: review-gate
+    approval:
+      message: "Review the proposed refactor. Check the artifacts directory."
+      capture_response: true
+      on_reject:
+        prompt: "Revise the refactor plan based on: $REJECTION_REASON"
+        max_attempts: 3
+    depends_on: [propose]
+
+  - id: execute
+    command: execute-refactor
+    depends_on: [review-gate]
+
+  - id: pr
+    command: create-pr
+    depends_on: [execute]
+    context: fresh
+```
+
+## Example: early termination with `cancel`
+
+```yaml
+nodes:
+  - id: check
+    bash: "git merge-base --is-ancestor HEAD origin/main && echo ok || echo blocked"
+
+  - id: stop-if-blocked
+    cancel: "PR has merge conflicts — cannot proceed with review"
+    depends_on: [check]
+    when: "$check.output == 'blocked'"
+
+  - id: review
+    prompt: "Review the PR..."
+    depends_on: [check]
+    when: "$check.output == 'ok'"
+```
+
+## Debugging workflows
+
+<Steps>
+  <Step title="Validate the workflow">
+    Check for schema errors and verify that all referenced command files, MCP configs, and script files exist:
+
+    ```bash
+    archon validate workflows my-workflow
+    archon validate workflows my-workflow --json   # machine-readable
+    ```
+  </Step>
+  <Step title="List discovered workflows">
+    ```bash
+    archon workflow list
+    ```
+    Load errors are reported here—a broken YAML doesn't abort discovery of other workflows.
+  </Step>
+  <Step title="Run with test input">
+    ```bash
+    archon workflow run my-workflow "test input"
+    ```
+    Watch the streaming output to observe each node's execution.
+  </Step>
+  <Step title="Inspect artifacts">
+    After a run, inspect `~/.archon/workspaces/owner/repo/artifacts/runs/{workflow-id}/` for node output artifacts.
+  </Step>
+  <Step title="Check execution logs">
+    ```
+    ~/.archon/workspaces/owner/repo/logs/{workflow-id}.jsonl
+    ```
+    Each line is a JSON event: step start, AI response, tool call, error, etc.
+  </Step>
+</Steps>
+
+## Web execution mode (`interactive: true`)
+
+By default, workflows started from the Web UI run in the background—AI output appears only in the workflow run log, not in the chat window.
+
+Set `interactive: true` to run the workflow in the foreground (same behavior as CLI, Slack, Telegram, and GitHub):
+
+```yaml
+name: my-interactive-workflow
+interactive: true   # Web UI: output visible in chat window
+
+nodes:
+  - id: plan
+    prompt: "Create a plan for $USER_MESSAGE"
+  - id: review-gate
+    approval:
+      message: "Does this plan look good?"
+    depends_on: [plan]
+  - id: implement
+    command: implement
+    depends_on: [review-gate]
+```
+
+`interactive: true` is required whenever the workflow contains approval nodes or interactive loop nodes that need to deliver messages to the user's chat window.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Commands" icon="file-text" href="/guides/authoring-commands">
+    Write the markdown command files that `command:` nodes reference.
+  </Card>
+  <Card title="Loop Nodes" icon="refresh-cw" href="/guides/loop-nodes">
+    Deep dive into iterative AI execution with `loop:` nodes.
+  </Card>
+  <Card title="Approval Nodes" icon="check-circle" href="/guides/approval-nodes">
+    Pause workflows for human review with `approval:` gates.
+  </Card>
+  <Card title="Script Nodes" icon="code" href="/guides/script-nodes">
+    Run TypeScript or Python as deterministic pipeline steps.
+  </Card>
+  <Card title="Global Workflows" icon="globe" href="/guides/global-workflows">
+    User-level workflows available in every project.
+  </Card>
+  <Card title="Variable Reference" icon="variable" href="/reference/variables">
+    Complete list of available substitution variables.
+  </Card>
+</CardGroup>

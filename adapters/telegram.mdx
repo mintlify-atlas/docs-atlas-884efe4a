@@ -1,0 +1,126 @@
+---
+title: "Telegram bot adapter: connect Archon to Telegram"
+description: "Create a Telegram bot via BotFather, configure TELEGRAM_BOT_TOKEN, restrict access with a user whitelist, and start coding from any Telegram client."
+---
+
+The Telegram adapter lets you interact with Archon from any Telegram client — desktop, mobile, or web — using the Telegram Bot API with long-polling. Archon uses the [grammY](https://grammy.dev) SDK. No public URL or webhook is required; the adapter polls Telegram directly. This page walks through creating a bot, configuring environment variables, restricting access, and understanding how conversations work.
+
+## Prerequisites
+
+- Archon server running — see [Quickstart](/quickstart)
+- A Telegram account
+
+## Setup
+
+<Steps>
+  <Step title="Create a bot with BotFather">
+    1. Open Telegram and start a conversation with [@BotFather](https://t.me/BotFather)
+    2. Send `/newbot` and follow the prompts — choose a name and a username (must end in `bot`)
+    3. BotFather replies with your bot token in the format `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`
+    4. Save the token — you will need it in the next step
+  </Step>
+  <Step title="Set the bot token">
+    Add the token to your `.env` file:
+
+    ```ini
+    TELEGRAM_BOT_TOKEN=123456789:ABCdefGHI...
+    ```
+
+    Archon reads this variable at startup. If the variable is missing the Telegram adapter will not start, but the rest of the server continues running.
+  </Step>
+  <Step title="Restart the server">
+    ```bash
+    bun run dev
+    ```
+
+    Look for a log line like `telegram.bot_started` to confirm the adapter is connected.
+  </Step>
+</Steps>
+
+## Restricting access (optional)
+
+By default the bot responds to any Telegram user. To restrict it to specific users, set a comma-separated whitelist of Telegram user IDs.
+
+**Finding your user ID:**
+1. Open Telegram and start a conversation with [@userinfobot](https://t.me/userinfobot)
+2. It replies with your numeric user ID (e.g. `123456789`)
+
+```ini
+TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
+```
+
+When this variable is set, messages from users not in the list are **silently rejected** — the bot does not reply and logs the attempt with a masked user ID for privacy. When the variable is empty or unset, the bot responds to all users.
+
+<Note>
+  The variable name `TELEGRAM_ALLOWED_USERS` is also accepted as an alias.
+</Note>
+
+## Streaming mode (optional)
+
+```ini
+TELEGRAM_STREAMING_MODE=stream  # stream (default) | batch
+```
+
+In `stream` mode Archon sends partial AI responses as they arrive, updating the message in place. In `batch` mode it sends one complete message at a time. See [Configuration](/reference/configuration) for details.
+
+## How conversations work
+
+Each Telegram chat maps to exactly one Archon conversation. The conversation ID is the Telegram `chat_id` — the numeric identifier for the chat (private chat with the bot, group, or supergroup).
+
+- **Private chats** — every user has a dedicated conversation with the bot
+- **Group chats** — the bot shares a single conversation context with the entire group
+
+Because each chat is its own persistent conversation, the AI assistant maintains context across messages automatically. You do not need to do anything special to continue a previous conversation — just send another message in the same chat.
+
+## Usage
+
+Once the bot is running, start a conversation in Telegram:
+
+```
+/help
+```
+
+```
+review my last commit
+```
+
+```
+/workflow list
+```
+
+All [slash commands](/reference/cli) work the same way they do in the Web UI. Workflow triggers also work — describe what you want and Archon routes to the right workflow.
+
+<Tip>
+  To run a workflow directly, use the `/workflow run` command:
+
+  ```
+  /workflow run assist what does the orchestrator do?
+  ```
+</Tip>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot does not respond">
+    - Verify `TELEGRAM_BOT_TOKEN` is set correctly in `.env`
+    - Check the server logs for `telegram.start_failed` or `telegram.start_conflict_retrying`
+    - If you see a `409 Conflict` error, another process is polling with the same token — stop it and wait about 60 seconds before restarting
+  </Accordion>
+  <Accordion title="Unauthorized messages">
+    If you set `TELEGRAM_ALLOWED_USER_IDS` and the bot ignores your messages, confirm your user ID is correct by messaging [@userinfobot](https://t.me/userinfobot) again. IDs are numeric — do not include the `@` prefix.
+  </Accordion>
+  <Accordion title="Messages are too long">
+    Telegram has a 4096-character message limit. Archon automatically splits long responses into paragraph-sized chunks and falls back to plain text if Markdown formatting fails.
+  </Accordion>
+</AccordionGroup>
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config options.
+  </Card>
+  <Card title="Slack adapter" icon="message-square" href="/adapters/slack">
+    Connect Archon to a Slack workspace via Socket Mode.
+  </Card>
+</CardGroup>

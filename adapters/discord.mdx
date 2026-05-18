@@ -1,0 +1,167 @@
+---
+title: "Discord bot adapter: connect Archon to Discord servers"
+description: "Create a Discord application and bot, enable the Message Content intent, set DISCORD_BOT_TOKEN, invite the bot to your server, and start coding from Discord."
+---
+
+The Discord adapter is a **community-contributed** adapter that connects Archon to Discord servers and DMs using the [discord.js](https://discord.js.org) library over a persistent WebSocket (Gateway) connection. You interact with the bot by @mentioning it in server channels or by sending it direct messages. This page covers creating a Discord application, enabling required intents, inviting the bot to your server, and configuring environment variables.
+
+<Note>
+  The Discord adapter is maintained by the community. If you run into issues specific to Discord integration, check the [GitHub repository](https://github.com/coleam00/Archon) for open issues or open a new one.
+</Note>
+
+## Prerequisites
+
+- Archon server running — see [Quickstart](/quickstart)
+- A Discord account
+- **Manage Server** permission on the server you want to add the bot to
+
+## How conversation IDs work
+
+Each Discord channel maps to a single Archon conversation. The conversation ID is the channel's numeric ID (e.g. `1234567890123456789`). All messages in the same channel share one conversation and full context is preserved across messages.
+
+For direct messages, the DM channel between you and the bot is the conversation.
+
+## Setup
+
+<Steps>
+  <Step title="Create a Discord application">
+    1. Visit [discord.com/developers/applications](https://discord.com/developers/applications)
+    2. Click **New Application**, enter a name, and click **Create**
+    3. Go to the **Bot** tab in the left sidebar
+    4. Click **Add Bot** and confirm
+  </Step>
+  <Step title="Get the bot token">
+    1. On the **Bot** tab, click **Reset Token**
+    2. Copy the token — it starts with a long alphanumeric string
+    3. **Save it securely**: you cannot view this token again after leaving the page
+
+    <Warning>
+      Treat the bot token like a password. Anyone with the token can control your bot. Never commit it to version control.
+    </Warning>
+  </Step>
+  <Step title="Enable Message Content Intent">
+    1. On the **Bot** tab, scroll to **Privileged Gateway Intents**
+    2. Enable **Message Content Intent**
+    3. Click **Save Changes**
+
+    <Warning>
+      This step is required. Without it, Discord will reject the bot's connection with "Used disallowed intents". Archon logs `discord.start_failed_continuing_without_adapter` and keeps the rest of the server running, but the Discord adapter will be unavailable until the intent is enabled and the server is restarted.
+    </Warning>
+  </Step>
+  <Step title="Generate an invite URL and add the bot to your server">
+    1. Go to **OAuth2 → URL Generator** in the left sidebar
+    2. Under **Scopes**, select `bot`
+    3. Under **Bot Permissions**, select:
+       - Send Messages
+       - Read Message History
+       - Create Public Threads *(optional, for thread support)*
+       - Send Messages in Threads *(optional, for thread support)*
+    4. Copy the generated URL at the bottom of the page
+    5. Paste it in your browser, select your server, and click **Authorize**
+  </Step>
+  <Step title="Set the environment variable">
+    Add the bot token to your `.env` file:
+
+    ```ini
+    DISCORD_BOT_TOKEN=your_bot_token_here
+    ```
+  </Step>
+  <Step title="Restart the server">
+    ```bash
+    bun run dev
+    ```
+
+    Look for a log line confirming the Discord adapter connected. The bot should now appear online in your server.
+  </Step>
+</Steps>
+
+## Restricting access (optional)
+
+To limit which Discord users can interact with the bot, enable Developer Mode and collect user IDs:
+
+1. Open **Discord Settings → Advanced** and toggle **Developer Mode** ON
+2. Right-click a user in any channel and choose **Copy User ID**
+
+Then add a comma-separated list to your `.env`:
+
+```ini
+DISCORD_ALLOWED_USER_IDS=123456789012345678,987654321098765432
+```
+
+When set, messages from users not in the list are **silently rejected** — the bot does not reply and logs the attempt. When empty or unset, the bot responds to all users.
+
+## Streaming mode (optional)
+
+```ini
+DISCORD_STREAMING_MODE=batch  # batch (default) | stream
+```
+
+In `batch` mode Archon sends one complete message per response, which avoids Discord's rate limits. In `stream` mode it updates the message progressively. See [Configuration](/reference/configuration) for details.
+
+## Usage
+
+### @Mention in a server channel
+
+After inviting the bot, @mention it to send a message:
+
+```
+@YourBotName help me refactor this function
+```
+
+```
+@YourBotName /workflow list
+```
+
+### Direct messages
+
+Send a DM directly to the bot — no @mention needed:
+
+```
+/help
+```
+
+```
+review my last commit
+```
+
+### Threads
+
+The bot maintains context in thread conversations. All messages in the same thread are part of the same conversation.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot appears offline after starting the server">
+    - Verify `DISCORD_BOT_TOKEN` is set and correct in `.env`
+    - Check the server logs for errors from the Discord adapter
+    - Confirm **Message Content Intent** is enabled in the Developer Portal
+  </Accordion>
+  <Accordion title='"Used disallowed intents" error'>
+    Enable the **Message Content Intent** under **Bot → Privileged Gateway Intents** in the [Discord Developer Portal](https://discord.com/developers/applications), then restart the Archon server.
+  </Accordion>
+  <Accordion title="Bot does not respond to messages">
+    - Make sure you @mention the bot in server channels (DMs do not require a mention)
+    - Check that the bot has **Send Messages** and **Read Message History** permissions in the channel
+    - If `DISCORD_ALLOWED_USER_IDS` is set, verify your user ID is included
+  </Accordion>
+  <Accordion title="Bot was added to server but shows no permissions">
+    Regenerate the invite URL from **OAuth2 → URL Generator** in the Developer Portal and re-invite the bot. Make sure to select the required bot permissions before copying the URL.
+  </Accordion>
+</AccordionGroup>
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config options.
+  </Card>
+  <Card title="Telegram adapter" icon="send" href="/adapters/telegram">
+    Connect Archon via Telegram Bot API with long-polling.
+  </Card>
+  <Card title="Slack adapter" icon="message-square" href="/adapters/slack">
+    Connect Archon to Slack via Socket Mode.
+  </Card>
+  <Card title="Authoring workflows" icon="workflow" href="/guides/authoring-workflows">
+    Build multi-step automated workflows triggered from any adapter.
+  </Card>
+</CardGroup>

@@ -1,0 +1,241 @@
+---
+title: "Authoring Commands: Reusable Markdown Prompt Files"
+description: "Learn how to write Archon command files — markdown prompt templates that serve as building blocks for AI workflow nodes with variable substitution."
+---
+
+Commands are the building blocks of Archon workflows. Each command is a markdown file that serves as a detailed instruction set for an AI agent. When a workflow executes `command: investigate-issue`, Archon loads the file, substitutes variables, and sends the content as a prompt to the AI. This page explains how to write effective commands.
+
+## What is a command file?
+
+A command file is a `.md` file placed in `.archon/commands/` relative to your working directory. Archon discovers them at runtime and makes them available to workflow `command:` nodes and slash commands.
+
+```markdown .archon/commands/investigate-issue.md
+---
+description: Investigate a GitHub issue and produce an implementation plan
+argument-hint: <issue-number or description>
+---
+
+# Investigate Issue
+
+**Input**: $ARGUMENTS
+
+---
+
+## Your mission
+
+Analyze the reported issue and produce a detailed implementation plan artifact.
+
+**Output artifact**: `$ARTIFACTS_DIR/issues/issue-$1.md`
+
+## Phase 1: Load context
+
+1. Read the issue description: `gh issue view $1`
+2. Find relevant source files using search tools
+3. Read the files and trace the code path
+
+## Phase 2: Plan
+
+Create a step-by-step implementation plan with:
+- Specific file paths and line numbers to change
+- Before/after code snippets
+- Validation commands to verify the fix
+
+## Phase 3: Save artifact
+
+Write the complete plan to `$ARTIFACTS_DIR/issues/issue-$1.md`.
+```
+
+### Frontmatter fields
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `description` | Recommended | Shown in `/commands` list and used by workflow router |
+| `argument-hint` | Optional | Displayed to users as a hint for what input to provide |
+
+## File location and discovery
+
+Commands are loaded from:
+
+1. **Bundled defaults** — built into the Archon binary
+2. **Global** — `~/.archon/commands/` (applies to every project)
+3. **Project** — `.archon/commands/` in your repo (overrides globals and defaults by filename)
+
+Subdirectories are not supported for commands. Same-named files in your repo override bundled defaults.
+
+<Note>
+**CLI vs. server:** The CLI reads commands from wherever you run it (sees uncommitted changes). The server reads from `~/.archon/workspaces/owner/repo/` and only sees changes that have been pushed.
+</Note>
+
+## Variable substitution
+
+Variables are substituted at runtime before the command is sent to the AI:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `$ARGUMENTS` | All arguments as a single string | `"Fix issue #42"` |
+| `$1`, `$2`, `$3` | Positional arguments (space-separated) | `$1` = `"Fix"` |
+| `$ARTIFACTS_DIR` | Per-run artifacts directory (pre-created) | `~/.archon/workspaces/.../artifacts/runs/abc123` |
+| `$WORKFLOW_ID` | Current workflow run ID | `abc123-...` |
+| `$BASE_BRANCH` | Base branch (auto-detected from git) | `main` |
+| `$DOCS_DIR` | Docs directory from config (default: `docs/`) | `docs/` |
+
+See [Variable Reference](/reference/variables) for the complete list.
+
+## Referencing commands from workflows
+
+Use the `command:` field in a workflow node to reference a command file by name (without the `.md` extension or path):
+
+```yaml .archon/workflows/fix-issue.yaml
+nodes:
+  - id: investigate
+    command: investigate-issue       # loads .archon/commands/investigate-issue.md
+
+  - id: implement
+    command: implement-issue
+    depends_on: [investigate]
+```
+
+The `command:` node type sends the file contents as a prompt to the configured AI provider.
+
+## The artifact pattern
+
+In multi-step workflows, agents don't share memory between nodes (especially with `fresh_context: true`). The **only** way to pass information between steps is through artifact files written to `$ARTIFACTS_DIR`.
+
+```
+Step 1: investigate       Step 2: implement
+┌─────────────────┐       ┌─────────────────┐
+│ AI reads issue  │       │ AI reads plan   │
+│ Produces plan ──┼──────►│ Executes plan   │
+└─────────────────┘       └─────────────────┘
+         │
+         ▼
+  $ARTIFACTS_DIR/
+  issues/issue-42.md
+```
+
+A good artifact contains everything the next agent needs — specific file paths, line numbers, code snippets, validation commands, and edge cases. A vague artifact causes the next step to fail or produce low-quality output.
+
+## Phase-based structure
+
+Break commands into named phases so the AI knows where it is in the process and can self-verify before proceeding:
+
+```markdown .archon/commands/implement-feature.md
+---
+description: Implement a feature from an existing plan artifact
+argument-hint: <feature-name>
+---
+
+# Implement Feature
+
+**Input**: $ARGUMENTS
+
+---
+
+## Phase 1: LOAD — Get context
+
+1. Load the plan: `cat $ARTIFACTS_DIR/plans/$1.md`
+2. Read the files listed in the plan
+3. Confirm you understand all required changes
+
+**PHASE_1_CHECKPOINT:**
+- [ ] Plan loaded and understood
+- [ ] All relevant files read
+
+---
+
+## Phase 2: IMPLEMENT — Make changes
+
+Follow the plan step by step. After each file change, run:
+
+```bash
+bun run type-check
+```
+
+**PHASE_2_CHECKPOINT:**
+- [ ] All changes made
+- [ ] Type check passes
+
+---
+
+## Phase 3: VALIDATE — Verify
+
+Run the full test suite:
+
+```bash
+bun run test
+```
+
+If tests fail, fix the issue before proceeding.
+
+---
+
+## Success criteria
+
+- **WORK_COMPLETE**: All plan steps executed
+- **TESTS_PASS**: Full validation suite green
+- **COMMITTED**: Changes committed to git
+```
+
+<Tip>
+Use checkpoints (`PHASE_N_CHECKPOINT`) so the AI self-verifies before moving to the next phase. This significantly reduces errors in long-running commands.
+</Tip>
+
+## Anti-patterns to avoid
+
+<AccordionGroup>
+  <Accordion title="Vague instructions">
+    **Bad:** `Analyze the code and find the problem.`
+
+    **Good:** Be specific — name the file, the function, the error type. Tell the agent exactly what to search for and what to document. Vague instructions produce vague artifacts, and the next workflow node will have nothing concrete to act on.
+  </Accordion>
+  <Accordion title="Missing artifact instructions">
+    **Bad:** `Output your findings.`
+
+    **Good:** Specify the exact artifact path and format. Treat the artifact as the handoff document to the next agent — it must be complete and self-contained with file paths, line numbers, and validation steps.
+  </Accordion>
+  <Accordion title="Assuming context across nodes">
+    **Bad:** `Fix the bug in the file we discussed.`
+
+    **Good:** Load the artifact explicitly at the start of the command. Reference `$ARTIFACTS_DIR/issues/issue-$1.md` so the agent knows exactly where to find the context — never assume it persists from a previous node.
+  </Accordion>
+  <Accordion title="No error handling">
+    **Bad:** `Create the PR.`
+
+    **Good:** Check if a PR already exists first. If it does, update it. If not, create a new draft PR. Always handle the case where the previous step produced no changes — the command should gracefully exit rather than failing the whole workflow.
+  </Accordion>
+</AccordionGroup>
+
+## Testing your command
+
+```bash
+# Run the workflow that uses this command with test input
+archon workflow run my-workflow "test input"
+
+# Validate the command file is syntactically correct
+archon validate commands my-command
+```
+
+After the run, check the artifacts directory:
+
+```bash
+ls ~/.archon/workspaces/owner/repo/artifacts/runs/
+```
+
+Verify the artifact contains everything needed for the next workflow step.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring Workflows" icon="diagram-project" href="/guides/authoring-workflows">
+    Use commands in YAML workflow DAGs with `command:` nodes.
+  </Card>
+  <Card title="Global Workflows" icon="globe" href="/guides/global-workflows">
+    Place commands in `~/.archon/commands/` for use across all projects.
+  </Card>
+  <Card title="Variable Reference" icon="brackets-curly" href="/reference/variables">
+    Complete list of available substitution variables.
+  </Card>
+  <Card title="Workflow Schema" icon="file-code" href="/reference/workflow-schema">
+    Full YAML schema for all node types.
+  </Card>
+</CardGroup>

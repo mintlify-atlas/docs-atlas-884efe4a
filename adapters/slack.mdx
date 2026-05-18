@@ -1,0 +1,216 @@
+---
+title: "Slack app adapter: connect Archon to Slack via Socket Mode"
+description: "Create a Slack app, configure OAuth scopes and Socket Mode, set SLACK_BOT_TOKEN and SLACK_APP_TOKEN, and interact with Archon from any channel or DM."
+---
+
+The Slack adapter connects Archon to a Slack workspace using the [Bolt for JavaScript](https://tools.slack.dev/bolt-js/) SDK in **Socket Mode**. Socket Mode keeps a persistent WebSocket connection from your server to Slack — no public HTTP endpoint or firewall rule required, which makes it ideal for local development and private networks. This page covers creating a Slack app, configuring permissions, setting environment variables, and day-to-day usage patterns.
+
+## Prerequisites
+
+- Archon server running — see [Quickstart](/quickstart)
+- A Slack workspace where you have permission to install apps
+
+## Socket Mode overview
+
+<CardGroup cols={2}>
+  <Card title="No public URL needed" icon="shield">
+    Archon connects outbound to Slack. You do not need to expose a port to the internet.
+  </Card>
+  <Card title="Works behind firewalls" icon="lock">
+    Suitable for office networks, VPNs, and local development machines.
+  </Card>
+  <Card title="Simple local development" icon="laptop">
+    Start the server and events flow through the WebSocket immediately.
+  </Card>
+  <Card title="Not for App Directory" icon="info">
+    Socket Mode apps cannot be listed in the public Slack App Directory — fine for personal and team use.
+  </Card>
+</CardGroup>
+
+## Setup
+
+<Steps>
+  <Step title="Create a Slack app">
+    1. Go to [api.slack.com/apps](https://api.slack.com/apps) and sign in
+    2. Click **Create New App** → **From scratch**
+    3. Enter an **App Name** (this is what users @mention) and select your workspace
+    4. Click **Create App**
+  </Step>
+  <Step title="Enable Socket Mode">
+    1. In the left sidebar click **Socket Mode**
+    2. Toggle **Enable Socket Mode** to ON
+    3. When prompted, create an App-Level Token:
+       - **Token Name**: `socket-mode`
+       - **Scopes**: add `connections:write`
+       - Click **Generate**
+    4. Copy the token — it starts with `xapp-`
+    5. Save it as `SLACK_APP_TOKEN` in your `.env`
+  </Step>
+  <Step title="Add Bot Token Scopes">
+    1. In the left sidebar click **OAuth & Permissions**
+    2. Scroll to **Scopes → Bot Token Scopes** and add:
+
+    | Scope | Purpose |
+    |-------|---------|
+    | `app_mentions:read` | Receive @mention events |
+    | `chat:write` | Send messages |
+    | `channels:history` | Read messages in public channels (thread context) |
+    | `channels:join` | Allow the bot to join public channels |
+    | `groups:history` | Read messages in private channels (optional) |
+    | `im:history` | Read DM history |
+    | `im:write` | Send DMs |
+    | `im:read` | Read DM metadata |
+    | `mpim:history` | Read group DM history (optional) |
+    | `mpim:write` | Send group DMs |
+  </Step>
+  <Step title="Subscribe to bot events">
+    1. In the left sidebar click **Event Subscriptions**
+    2. Toggle **Enable Events** to ON
+    3. Under **Subscribe to bot events** add:
+       - `app_mention` — when someone @mentions your bot
+       - `message.im` — direct messages to your bot
+       - `message.channels` — messages in public channels (optional)
+       - `message.groups` — messages in private channels (optional)
+    4. Click **Save Changes**
+  </Step>
+  <Step title="Install to workspace">
+    1. In the left sidebar click **Install App**
+    2. Click **Install to Workspace** and click **Allow**
+    3. Copy the **Bot User OAuth Token** — it starts with `xoxb-`
+    4. Save it as `SLACK_BOT_TOKEN` in your `.env`
+  </Step>
+  <Step title="Set environment variables">
+    Add both tokens to your `.env` file:
+
+    ```ini
+    SLACK_BOT_TOKEN=xoxb-your-bot-token
+    SLACK_APP_TOKEN=xapp-your-app-token
+    ```
+  </Step>
+  <Step title="Invite the bot to a channel">
+    In Slack, go to any channel and run:
+
+    ```
+    /invite @your-bot-name
+    ```
+
+    The bot now responds to @mentions in that channel.
+  </Step>
+</Steps>
+
+## Restricting access (optional)
+
+To limit which Slack users can interact with the bot, set a comma-separated list of Slack member IDs:
+
+**Finding a user's member ID:**
+
+1. In Slack, open the user's profile
+2. Click **...** (More actions) → **Copy member ID**
+
+```ini
+SLACK_ALLOWED_USER_IDS=U01ABC123,U02DEF456
+```
+
+When set, messages from users not in the list are **silently rejected**. The bot does not reply and logs the attempt with a masked user ID. When the variable is empty or unset, the bot responds to all users.
+
+## Streaming mode (optional)
+
+```ini
+SLACK_STREAMING_MODE=batch  # batch (default) | stream
+```
+
+Slack's default is `batch` — Archon sends one complete message per response. In `stream` mode it updates the message progressively. See [Configuration](/reference/configuration) for details.
+
+## Usage patterns
+
+### @Mention in a channel
+
+After inviting the bot to a channel, @mention it to send a message:
+
+```
+@your-bot /clone https://github.com/user/repo
+```
+
+```
+@your-bot review this PR
+```
+
+### Continue work in a thread
+
+Reply in the thread the bot created:
+
+```
+@your-bot /status
+```
+
+Slack conversation IDs use the format `channel:thread_ts`, so all replies in the same thread share one Archon conversation and full context is preserved.
+
+### Direct messages
+
+You can DM the bot directly — no @mention required:
+
+```
+/help
+```
+
+```
+/workflow list
+```
+
+### Parallel work with worktrees
+
+Start parallel work on a new branch from the same channel:
+
+```
+@your-bot /worktree feature-branch
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot does not respond to @mentions">
+    - Confirm Socket Mode is enabled in the app settings
+    - Verify both `SLACK_BOT_TOKEN` (starts with `xoxb-`) and `SLACK_APP_TOKEN` (starts with `xapp-`) are correct
+    - Ensure the bot is invited to the channel (`/invite @your-bot`)
+    - Check the server logs for `slack.bot_started`
+  </Accordion>
+  <Accordion title='"channel_not_found" error'>
+    The bot must be invited to the channel before it can post:
+
+    ```
+    /invite @your-bot
+    ```
+  </Accordion>
+  <Accordion title='"missing_scope" error'>
+    Add the required scope in **OAuth & Permissions** and click **Reinstall App** to apply the change.
+  </Accordion>
+  <Accordion title="Thread context not working">
+    Make sure the following scopes are added:
+
+    - `channels:history` for public channels
+    - `groups:history` for private channels
+  </Accordion>
+</AccordionGroup>
+
+## Security recommendations
+
+- **Use the user whitelist**: set `SLACK_ALLOWED_USER_IDS` to restrict access to specific team members
+- **Limit channel exposure**: invite the bot only to channels where it is needed
+- **Protect tokens**: never commit `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN` to version control
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config options.
+  </Card>
+  <Card title="Telegram adapter" icon="send" href="/adapters/telegram">
+    Connect Archon via Telegram Bot API with long-polling.
+  </Card>
+  <Card title="GitHub adapter" icon="github" href="/adapters/github">
+    Trigger Archon from issue and PR comments via webhooks.
+  </Card>
+  <Card title="Authoring workflows" icon="workflow" href="/guides/authoring-workflows">
+    Build multi-step automated workflows for your team.
+  </Card>
+</CardGroup>

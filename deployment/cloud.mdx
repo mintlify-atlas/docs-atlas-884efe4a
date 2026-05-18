@@ -1,0 +1,512 @@
+---
+title: "Deploy Archon to a Cloud VPS for Always-On Access"
+description: "Provision a Linux VPS, create a non-root user, configure UFW firewall, install Docker, and run Archon with Caddy HTTPS for 24/7 availability."
+---
+
+Archon runs well on any Linux VPS — DigitalOcean, Linode, AWS EC2, Hetzner, Vultr, or any provider with Ubuntu 22.04 support. This guide walks through provisioning the server, creating a dedicated non-root deploy user (required for security), configuring the UFW firewall, setting up DNS, installing Docker, and starting Archon with automatic HTTPS via Caddy. If you prefer a fully automated approach, see the Cloud-Init section of the [Docker guide](/deployment/docker).
+
+<Note>
+This guide focuses on the server setup steps specific to cloud deployments. For the full Docker Compose reference — profiles, volume mounts, environment variables, and the Caddy Caddyfile — see the [Docker guide](/deployment/docker).
+</Note>
+
+---
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Cloud VPS account" icon="server" href="https://www.digitalocean.com">
+    Any provider that offers Ubuntu 22.04 LTS (DigitalOcean, Linode, AWS EC2, Hetzner, Vultr).
+  </Card>
+  <Card title="Domain name" icon="globe" href="https://domains.google">
+    A domain or subdomain you control (e.g. `archon.yourdomain.com`) — required for HTTPS.
+  </Card>
+  <Card title="SSH key" icon="key" href="/deployment/local">
+    An ed25519 SSH key pair on your local machine. Generate one below if needed.
+  </Card>
+  <Card title="AI credentials" icon="robot" href="/getting-started/ai-assistants">
+    A Claude OAuth token or API key. Run `claude setup-token` locally to generate one.
+  </Card>
+</CardGroup>
+
+### Recommended server specs
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| vCPUs | 1 | 2 |
+| RAM | 2 GB | 4 GB |
+| Storage | 20 GB SSD | 40 GB SSD |
+| OS | Ubuntu 22.04 LTS | Ubuntu 22.04 LTS |
+
+### Generate an SSH key
+
+Before creating your VPS, generate an SSH key pair on your local machine:
+
+```bash
+ssh-keygen -t ed25519 -C "archon"
+# Accept the default file location (~/.ssh/id_ed25519)
+
+# Copy your public key — you'll paste this during VPS creation
+cat ~/.ssh/id_ed25519.pub
+# Windows: type %USERPROFILE%\.ssh\id_ed25519.pub
+```
+
+---
+
+## Step 1 — Provision the server
+
+<Tabs>
+  <Tab title="DigitalOcean">
+    1. Log in and click **Create → Droplets**
+    2. Select **Ubuntu 22.04 LTS**
+    3. Choose **Basic → 2 GB RAM** ($12/month)
+    4. Under **Authentication**, click **New SSH Key** and paste your public key
+    5. Click **Create Droplet** and note the public IP
+  </Tab>
+  <Tab title="AWS EC2">
+    1. Navigate to **EC2 → Launch Instance**
+    2. Select **Ubuntu Server 22.04 LTS**
+    3. Choose **t3.small** (2 GB RAM)
+    4. Under **Key Pair**, import your public key
+    5. In **Security Group**, allow inbound: SSH (22), HTTP (80), HTTPS (443)
+    6. Launch and note the public IP
+  </Tab>
+  <Tab title="Linode (Akamai)">
+    1. Click **Create → Linode**
+    2. Select **Ubuntu 22.04 LTS**, region closest to your users
+    3. Choose **Nanode 2 GB** ($12/month)
+    4. Under **SSH Keys**, add your public key
+    5. Click **Create Linode** and note the IP address
+  </Tab>
+  <Tab title="Hetzner">
+    1. Click **Create Server**
+    2. Select **Ubuntu 22.04**
+    3. Choose **CX22** (2 vCPU, 4 GB RAM, ~€4/month)
+    4. Add your SSH key under **SSH Keys**
+    5. Click **Create & Buy Now** and note the IP
+  </Tab>
+</Tabs>
+
+---
+
+## Step 2 — Initial server configuration
+
+Connect to your new server as root:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 root@your-server-ip
+```
+
+### Create a non-root deploy user
+
+<Warning>
+Running Archon (and Claude Code) as root is not supported. You must create a non-root user. The container's `appuser` (UID 1001) also runs as non-root for the same reason.
+</Warning>
+
+```bash
+# Create user with sudo privileges
+adduser deploy
+usermod -aG sudo deploy
+
+# Copy root's SSH keys to the deploy user
+mkdir -p /home/deploy/.ssh
+cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh
+chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+Test the deploy user connection in a **new terminal** before proceeding:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 deploy@your-server-ip
+```
+
+### Disable password authentication
+
+```bash
+nano /etc/ssh/sshd_config
+```
+
+Find and set:
+
+```
+PasswordAuthentication no
+```
+
+Save with `Ctrl+X → Y → Enter`, then restart SSH:
+
+```bash
+systemctl restart ssh
+su - deploy
+```
+
+### Configure the firewall
+
+```bash
+sudo ufw allow 22/tcp     # SSH
+sudo ufw allow 80/tcp     # HTTP (required by Caddy/Let's Encrypt)
+sudo ufw allow 443        # HTTPS (TCP + UDP for HTTP/3)
+sudo ufw --force enable
+sudo ufw status
+```
+
+---
+
+## Step 3 — Install Docker
+
+```bash
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# Add deploy user to the docker group
+sudo usermod -aG docker deploy
+
+# Log out and back in for group changes to take effect
+exit
+ssh -i ~/.ssh/id_ed25519 deploy@your-server-ip
+```
+
+Install supporting packages:
+
+```bash
+sudo apt update
+sudo apt install -y docker-compose-plugin git postgresql-client
+
+# Verify
+docker --version
+docker compose version
+git --version
+```
+
+---
+
+## Step 4 — Configure DNS
+
+Point your domain to the server before starting Caddy — Let's Encrypt requires DNS to resolve at certificate issuance time.
+
+Create an **A record** at your DNS provider:
+
+| Type | Name | Value | TTL |
+|------|------|-------|-----|
+| A | `archon` (or `@` for root) | Your server IP | 300 |
+
+**Cloudflare users:** Set Proxy to **DNS Only** (grey cloud) — Caddy manages TLS directly and Cloudflare proxying will interfere with certificate issuance.
+
+Verify propagation before continuing:
+
+```bash
+dig archon.yourdomain.com
+# Should return your server IP
+```
+
+---
+
+## Step 5 — Clone and configure Archon
+
+```bash
+sudo mkdir -p /opt/archon
+sudo chown deploy:deploy /opt/archon
+git clone https://github.com/coleam00/Archon /opt/archon
+```
+
+Copy and edit the environment file:
+
+```bash
+cd /opt/archon
+cp .env.example .env
+cp Caddyfile.example Caddyfile
+nano .env
+```
+
+Set these required variables:
+
+```ini .env
+# AI credential — choose one
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+# CLAUDE_API_KEY=sk-ant-xxxxx
+
+# Domain — must match your DNS A record
+DOMAIN=archon.yourdomain.com
+
+# Database — use the local PostgreSQL container
+DATABASE_URL=postgresql://postgres:postgres@postgres:5432/remote_coding_agent
+
+# GitHub token (for repository access and webhooks)
+GH_TOKEN=ghp_your_token_here
+GITHUB_TOKEN=ghp_your_token_here
+
+# Webhook secret — generate with: openssl rand -hex 32
+WEBHOOK_SECRET=your_generated_secret_here
+```
+
+<Tip>
+For production, consider a managed PostgreSQL service (Supabase, Neon, AWS RDS) instead of the local container. Set `DATABASE_URL` to the managed connection string and omit `--profile with-db`. Managed databases handle backups, failover, and scaling automatically.
+</Tip>
+
+### AI credentials
+
+<Tabs>
+  <Tab title="Claude OAuth token">
+    Run this on your **local machine** (not the server):
+
+    ```bash
+    claude setup-token
+    # Copy the token starting with sk-ant-oat01-...
+    ```
+
+    Add to `.env` on the server:
+
+    ```ini .env
+    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxxxx
+    ```
+  </Tab>
+  <Tab title="Claude API key">
+    1. Visit [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+    2. Create a key (starts with `sk-ant-`)
+    3. Add to `.env`:
+
+    ```ini .env
+    CLAUDE_API_KEY=sk-ant-xxxxx
+    ```
+  </Tab>
+  <Tab title="Codex">
+    Run `codex login` on your local machine, then extract credentials:
+
+    ```bash
+    cat ~/.codex/auth.json
+    # Windows: type %USERPROFILE%\.codex\auth.json
+    ```
+
+    Add all four values to `.env`:
+
+    ```ini .env
+    CODEX_ID_TOKEN=eyJhbGc...
+    CODEX_ACCESS_TOKEN=eyJhbGc...
+    CODEX_REFRESH_TOKEN=rt_...
+    CODEX_ACCOUNT_ID=6a6a7ba6-...
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Step 6 — Set workspace permissions
+
+The app container runs as UID 1001. Create and permission the workspace directory:
+
+```bash
+mkdir -p /opt/archon/workspace
+sudo chown -R 1001:1001 /opt/archon/workspace
+```
+
+---
+
+## Step 7 — Start services
+
+<Tabs>
+  <Tab title="With local PostgreSQL (recommended)">
+    ```bash
+    cd /opt/archon
+    docker compose --profile with-db --profile cloud up -d --build
+    ```
+
+    Watch startup logs:
+
+    ```bash
+    docker compose --profile with-db --profile cloud logs -f app
+    # Look for: [App] Archon is ready!
+    ```
+  </Tab>
+  <Tab title="With managed PostgreSQL">
+    If you're using an external database (Supabase, Neon, etc.), set `DATABASE_URL` and omit `--profile with-db`:
+
+    ```bash
+    # Run the combined migration against the remote database first
+    psql $DATABASE_URL < migrations/000_combined.sql
+
+    docker compose --profile cloud up -d --build
+
+    docker compose --profile cloud logs -f app
+    ```
+  </Tab>
+</Tabs>
+
+Press `Ctrl+C` to stop following logs — services keep running in the background.
+
+---
+
+## Step 8 — Verify deployment
+
+```bash
+# Health check via HTTPS (from your local machine)
+curl https://archon.yourdomain.com/api/health
+# Expected: {"status":"ok"}
+
+# Check all containers are running
+docker compose --profile with-db --profile cloud ps
+```
+
+Open `https://archon.yourdomain.com` in your browser. You should see the Archon Web UI with a green padlock and a Let's Encrypt certificate.
+
+---
+
+## Step 9 — Configure GitHub webhooks
+
+Now that your app has a public URL, register the webhook in GitHub:
+
+1. Go to `https://github.com/owner/repo/settings/hooks`
+2. Click **Add webhook**
+
+| Field | Value |
+|-------|-------|
+| Payload URL | `https://archon.yourdomain.com/webhooks/github` |
+| Content type | `application/json` |
+| Secret | Your `WEBHOOK_SECRET` from `.env` |
+| SSL verification | Enabled |
+| Events | Issues, Issue comments, Pull requests |
+
+3. Click **Add webhook** and check **Recent Deliveries** for a green checkmark.
+
+---
+
+## Protecting the Web UI
+
+By default, the Web UI is publicly accessible to anyone who knows the URL. If you want to restrict access, Caddy supports two auth methods.
+
+<Tabs>
+  <Tab title="Basic auth (simple)">
+    HTTP Basic Auth — browser shows a native credential dialog. No extra container.
+
+    ```bash
+    # 1. Generate a bcrypt hash
+    docker run caddy caddy hash-password --plaintext 'YOUR_PASSWORD'
+
+    # 2. Add to .env (use $$ to escape $ in hash values)
+    # CADDY_BASIC_AUTH=basicauth @protected { admin $$2a$$14$$<hash> }
+
+    # 3. Restart Caddy
+    docker compose --profile cloud restart caddy
+    ```
+
+    Webhook endpoints (`/webhooks/*`) and the health check (`/api/health`) automatically bypass auth.
+  </Tab>
+  <Tab title="Form auth (styled login page)">
+    A dark-mode HTML login page with 24-hour session cookies. Requires the `auth-service` container.
+
+    See the form auth setup in the [Docker guide](/deployment/docker#form-based-auth-option-a) for step-by-step instructions.
+
+    Start with:
+
+    ```bash
+    docker compose --profile with-db --profile cloud --profile auth up -d
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Maintenance and operations
+
+### View logs
+
+```bash
+docker compose --profile cloud logs -f              # All services
+docker compose --profile cloud logs -f app          # App only
+docker compose --profile cloud logs --tail=100 app  # Last 100 lines
+```
+
+### Update Archon
+
+```bash
+cd /opt/archon
+git pull
+docker compose --profile with-db --profile cloud up -d --build
+docker compose --profile with-db --profile cloud logs -f app
+```
+
+### Restart services
+
+```bash
+docker compose --profile cloud restart           # All services
+docker compose --profile cloud restart app       # App only
+docker compose --profile cloud restart caddy     # Caddy only
+```
+
+### Stop services
+
+```bash
+docker compose --profile cloud down              # Stop (data preserved)
+docker compose --profile cloud down -v           # Stop and delete volumes — destructive!
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Caddy not getting SSL certificate">
+    ```bash
+    dig archon.yourdomain.com     # Must return your server IP
+    sudo ufw status               # Ports 80 and 443 must be open
+    docker compose --profile cloud logs caddy
+    ```
+
+    Common causes: DNS not propagated yet (wait 5–60 min), firewall blocking 80/443, domain typo in `.env`, Cloudflare proxy enabled (must be DNS-only).
+  </Accordion>
+
+  <Accordion title="App not responding">
+    ```bash
+    docker compose --profile cloud ps
+    curl http://localhost:3000/api/health     # Tests app directly, bypasses Caddy
+    docker compose --profile cloud logs -f app
+    ```
+  </Accordion>
+
+  <Accordion title="Database connection errors">
+    ```bash
+    # Test connection directly
+    psql $DATABASE_URL -c "SELECT 1"
+
+    # Run migrations if tables are missing
+    psql $DATABASE_URL < migrations/000_combined.sql
+    ```
+  </Accordion>
+
+  <Accordion title="GitHub webhook not triggering">
+    1. Go to the webhook settings page and check **Recent Deliveries**
+    2. Verify `WEBHOOK_SECRET` in `.env` matches the secret in GitHub
+    3. Test reachability:
+       ```bash
+       curl https://archon.yourdomain.com/webhooks/github
+       # Should return 400 (missing signature) — endpoint is reachable
+       ```
+  </Accordion>
+
+  <Accordion title="Out of disk space">
+    ```bash
+    df -h
+    docker system df
+    docker system prune -a      # Remove unused images and containers
+    docker volume prune         # Remove unused volumes (check first)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Docker reference" icon="docker" href="/deployment/docker">
+    Full Docker Compose reference — profiles, volumes, Caddyfile, and all configuration options.
+  </Card>
+  <Card title="Local development" icon="code" href="/deployment/local">
+    Run Archon from source with Bun for hot-reload development.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of environment variables and config options.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/reference/troubleshooting">
+    Diagnose common startup and runtime issues.
+  </Card>
+</CardGroup>

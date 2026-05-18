@@ -1,0 +1,413 @@
+---
+title: "Archon Configuration Reference: YAML and Env Vars"
+description: "Complete reference for all Archon configuration options — .archon/config.yaml fields, environment variables, .env file locations, and config priority order."
+---
+
+Archon uses a layered configuration system that combines sensible built-in defaults, optional YAML config files at both user and repo level, and environment variable overrides. This page documents every supported field in `.archon/config.yaml` and every environment variable recognized by Archon.
+
+## Configuration priority
+
+Settings are resolved in this order, with later sources overriding earlier ones:
+
+1. **Built-in defaults** — Archon's compiled-in sensible defaults
+2. **Global config** — `~/.archon/config.yaml` (applies to every project)
+3. **Repo config** — `.archon/config.yaml` in the repository root
+4. **Environment variables** — always the highest priority
+
+---
+
+## `.archon/config.yaml` reference
+
+### Global config (`~/.archon/config.yaml`)
+
+User-wide preferences that apply to every project on the machine.
+
+```yaml
+# Default AI assistant (must match a registered provider: claude, codex, pi)
+defaultAssistant: claude
+
+assistants:
+  claude:
+    # Model string passed verbatim to the Claude SDK.
+    # Accepts: 'sonnet', 'opus', 'haiku', or any 'claude-*' identifier.
+    # Use 'inherit' to keep whatever the SDK resolves as its default.
+    model: sonnet
+
+    # Which Claude SDK config sources to load (CLAUDE.md, skills, commands, agents).
+    # Default: ['project', 'user']
+    settingSources:
+      - project   # <cwd>/.claude/
+      - user      # ~/.claude/
+
+    # Absolute path to the Claude Code executable.
+    # Required in compiled Archon binaries when CLAUDE_BIN_PATH is not set.
+    # Accepts the native ~/.local/bin/claude or the npm cli.js.
+    # claudeBinaryPath: /absolute/path/to/claude
+
+  codex:
+    model: gpt-5.3-codex
+    # Reasoning effort: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+    modelReasoningEffort: medium
+    # Web search mode: 'disabled' | 'cached' | 'live'
+    webSearchMode: disabled
+    # Additional directories Codex can read (absolute paths)
+    additionalDirectories:
+      - /absolute/path/to/other/repo
+    # codexBinaryPath: /absolute/path/to/codex
+
+# Per-platform streaming preferences
+streaming:
+  telegram: stream  # 'stream' | 'batch'
+  discord: batch
+  slack: batch
+  github: batch
+
+# Concurrency limits
+concurrency:
+  maxConversations: 10
+```
+
+### Repo config (`.archon/config.yaml`)
+
+Project-specific settings that override the global config for a single repository.
+
+```yaml
+# AI assistant for this project (used as default provider for workflows)
+assistant: claude
+
+assistants:
+  claude:
+    model: sonnet
+    settingSources:
+      - project   # Restrict to project-level sources only (e.g., for CI or shared envs)
+  codex:
+    model: gpt-5.3-codex
+    webSearchMode: live
+
+# Commands configuration
+commands:
+  folder: .archon/commands
+  autoLoad: true
+
+# Worktree settings
+worktree:
+  # Optional: auto-detected from git when not set. Fails with an error if set
+  # but the branch doesn't exist on remote.
+  baseBranch: main
+
+  # Gitignored files/dirs to copy into new worktrees after creation.
+  # .archon/ is always copied automatically — don't list it here.
+  copyFiles:
+    - .env
+    - .vscode/
+    - .claude/
+    - plans/
+
+  # Initialize git submodules in new worktrees (default: true).
+  # Set false to opt out.
+  initSubmodules: true
+
+  # Co-locate worktrees inside the repo instead of ~/.archon/workspaces/.
+  # Must be relative, no absolute paths, no '..' segments.
+  # path: .worktrees
+
+# Documentation directory (controls $DOCS_DIR variable)
+docs:
+  path: docs   # Default: docs/
+
+# Bundled defaults control
+defaults:
+  loadDefaultCommands: true
+  loadDefaultWorkflows: true
+```
+
+### `assistants.claude.settingSources`
+
+Controls which configuration sources the Claude Agent SDK loads during sessions — `CLAUDE.md`, skills, commands, agents, and hooks.
+
+| Value | Description |
+|-------|-------------|
+| `project` | Load project-level `<cwd>/.claude/` |
+| `user` | Load user-level `~/.claude/` |
+
+Default: `['project', 'user']`. To restrict to project-only sources (useful in CI or shared environments):
+
+```yaml
+assistants:
+  claude:
+    settingSources:
+      - project
+```
+
+### `worktree.copyFiles`
+
+`git worktree add` copies only tracked files. `worktree.copyFiles` bridges that gap by copying gitignored content into each new worktree after creation.
+
+**Semantics:**
+- Each entry is a path relative to the repo root (file or directory)
+- Missing files are silently skipped (`ENOENT` at debug level)
+- Directories are copied recursively
+- Per-entry failures are isolated — one bad entry won't abort the rest
+- Path-traversal attempts are rejected and logged
+
+`.archon/` is always copied automatically regardless of what you list here.
+
+---
+
+## Environment variables
+
+Environment variables override all other configuration. They are loaded from `~/.archon/.env` (user scope) and `<cwd>/.archon/.env` (project scope) at startup, with project scope overriding user scope.
+
+### Core
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ARCHON_HOME` | Base directory for all Archon-managed files. Ignored in Docker — container always uses `/.archon`. | `~/.archon` |
+| `PORT` | HTTP server listen port. Auto-allocated in worktrees (3190–4089). | `3090` |
+| `HOST` | Bind address for the HTTP server. Set to `127.0.0.1` to restrict to localhost. | `0.0.0.0` |
+| `LOG_LEVEL` | Logging verbosity: `fatal`, `error`, `warn`, `info`, `debug`, `trace` | `info` |
+| `BOT_DISPLAY_NAME` | Bot name shown in batch-mode "starting" messages | `Archon` |
+| `DEFAULT_AI_ASSISTANT` | Default AI assistant (must match a registered provider: `claude`, `codex`, `pi`) | `claude` |
+| `MAX_CONCURRENT_CONVERSATIONS` | Maximum concurrent AI conversations | `10` |
+| `SESSION_RETENTION_DAYS` | Delete inactive sessions older than N days | `30` |
+| `ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING` | Set to `1` to suppress the stderr warning emitted when `archon` runs inside a Claude Code session | — |
+| `ARCHON_VERBOSE_BOOT` | Set to `1` to print `[archon] loaded N keys from …` lines at boot. Also enabled by `LOG_LEVEL=debug` or `trace`. | — |
+
+### AI providers — Claude
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLAUDE_USE_GLOBAL_AUTH` | Use global auth from `claude /login` (`true`/`false`) | Auto-detect |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Explicit OAuth token (alternative to global auth) | — |
+| `CLAUDE_API_KEY` | Explicit API key (alternative to global auth) | — |
+| `CLAUDE_BIN_PATH` | Absolute path to the Claude Code executable. Required for compiled binaries when `claudeBinaryPath` is not set in config. | — |
+| `TITLE_GENERATION_MODEL` | Lightweight model for generating conversation titles | SDK default |
+| `ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS` | Timeout (ms) before Claude subprocess is considered hung | `60000` |
+
+When `CLAUDE_USE_GLOBAL_AUTH` is unset, Archon auto-detects: it uses explicit tokens if present, otherwise falls back to global auth.
+
+### AI providers — Codex
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CODEX_ID_TOKEN` | Codex ID token (from `~/.codex/auth.json`) | — |
+| `CODEX_ACCESS_TOKEN` | Codex access token | — |
+| `CODEX_REFRESH_TOKEN` | Codex refresh token | — |
+| `CODEX_ACCOUNT_ID` | Codex account ID | — |
+| `CODEX_BIN_PATH` | Path to Codex native binary (binary builds only) | — |
+
+### AI providers — Pi (community)
+
+Pi provides access to ~20 LLM backends through a single provider. Set `provider: pi` and `model: <backend>/<model>` in your workflow YAML (e.g., `model: google/gemini-2.5-pro`).
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Pi backend: `anthropic` |
+| `OPENAI_API_KEY` | Pi backend: `openai` |
+| `GEMINI_API_KEY` | Pi backend: `google` |
+| `GROQ_API_KEY` | Pi backend: `groq` |
+| `MISTRAL_API_KEY` | Pi backend: `mistral` |
+| `OPENROUTER_API_KEY` | Pi backend: `openrouter` |
+| `XAI_API_KEY` | Pi backend: `xai` |
+| `PI_CODING_AGENT_DIR` | Override Pi data directory (useful in Docker to persist on the Archon volume) | `~/.pi/agent/` |
+
+### Platform adapters — Slack
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) | — |
+| `SLACK_APP_TOKEN` | Slack app-level token for Socket Mode (`xapp-...`) | — |
+| `SLACK_ALLOWED_USER_IDS` | Comma-separated Slack user IDs for allowlist | Open access |
+| `SLACK_STREAMING_MODE` | `stream` or `batch` | `batch` |
+
+### Platform adapters — Telegram
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | — |
+| `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated Telegram user IDs for allowlist | Open access |
+| `TELEGRAM_STREAMING_MODE` | `stream` or `batch` | `stream` |
+
+### Platform adapters — Discord
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DISCORD_BOT_TOKEN` | Discord bot token from Developer Portal | — |
+| `DISCORD_ALLOWED_USER_IDS` | Comma-separated Discord user IDs for allowlist | Open access |
+| `DISCORD_STREAMING_MODE` | `stream` or `batch` | `batch` |
+
+### Platform adapters — GitHub
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GH_TOKEN` | GitHub personal access token (also used by `gh` CLI) | — |
+| `GITHUB_TOKEN` | Alias for `GH_TOKEN` (used by the GitHub adapter) | — |
+| `WEBHOOK_SECRET` | HMAC SHA-256 secret for GitHub webhook signature verification | — |
+| `GITHUB_ALLOWED_USERS` | Comma-separated GitHub usernames for allowlist (case-insensitive) | Open access |
+| `GITHUB_BOT_MENTION` | @mention name the bot responds to in issues/PRs | Falls back to `BOT_DISPLAY_NAME` |
+
+### Platform adapters — GitLab (community)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITLAB_URL` | GitLab instance URL (default: `https://gitlab.com`; set for self-hosted) | `https://gitlab.com` |
+| `GITLAB_TOKEN` | Personal or project access token with `api` scope | — |
+| `GITLAB_WEBHOOK_SECRET` | Secret token set in GitLab webhook configuration | — |
+| `GITLAB_ALLOWED_USERS` | Comma-separated GitLab usernames for allowlist (case-insensitive) | Open access |
+| `GITLAB_BOT_MENTION` | @mention name for detection in issues/MRs | Falls back to `BOT_DISPLAY_NAME` |
+
+### Platform adapters — Gitea (community)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITEA_URL` | Self-hosted Gitea instance URL (e.g., `https://gitea.example.com`) | — |
+| `GITEA_TOKEN` | Gitea personal access token or bot account token | — |
+| `GITEA_WEBHOOK_SECRET` | HMAC SHA-256 secret for Gitea webhook signature verification | — |
+| `GITEA_ALLOWED_USERS` | Comma-separated Gitea usernames for allowlist (case-insensitive) | Open access |
+| `GITEA_BOT_MENTION` | @mention name for detection in issues/PRs | Falls back to `BOT_DISPLAY_NAME` |
+
+### Database
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string. Omit to use SQLite. | SQLite at `~/.archon/archon.db` |
+
+### Web UI
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WEB_UI_ORIGIN` | CORS origin for API routes (restrict when exposing publicly) | `*` (allow all) |
+| `WEB_UI_DEV` | When set, skip serving static frontend (Vite dev server used instead) | — |
+
+### Worktree management
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STALE_THRESHOLD_DAYS` | Days before an inactive worktree is considered stale | `14` |
+| `MAX_WORKTREES_PER_CODEBASE` | Max worktrees per codebase before auto-cleanup | `25` |
+| `CLEANUP_INTERVAL_HOURS` | How often the background cleanup service runs | `6` |
+
+### Docker / deployment
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ARCHON_DATA` | Host path for Archon data. Compose-only — sets the bind-mount source for `/.archon`. Not read by Archon source code. | Docker-managed volume |
+| `ARCHON_USER_HOME` | Host path for `/home/appuser`. Compose-only — sets the bind-mount source. | Docker-managed volume |
+| `DOMAIN` | Public domain for Caddy reverse proxy (TLS auto-provisioned) | — |
+| `CADDY_BASIC_AUTH` | Caddy basicauth directive to protect the Web UI and API | Disabled |
+| `AUTH_USERNAME` | Username for form-based auth (Caddy forward_auth) | — |
+| `AUTH_PASSWORD_HASH` | Bcrypt hash for form-based auth password (escape `$` as `$$` in Compose) | — |
+| `COOKIE_SECRET` | 64-hex-char secret for auth session cookies | — |
+| `AUTH_SERVICE_PORT` | Port for the auth service container | `9000` |
+| `COOKIE_MAX_AGE` | Auth cookie lifetime in seconds | `86400` |
+
+### Telemetry
+
+| Variable | Description |
+|----------|-------------|
+| `ARCHON_TELEMETRY_DISABLED` | Set to `1` to disable anonymous telemetry |
+| `DO_NOT_TRACK` | Set to `1` to disable telemetry (de facto standard) |
+| `POSTHOG_API_KEY` | API key for a self-hosted PostHog instance |
+| `POSTHOG_HOST` | PostHog host URL (default: `https://us.i.posthog.com`) |
+
+---
+
+## `.env` file locations
+
+Archon keys env loading on **directory ownership**, not filename. `.archon/` directories at `~/` or `<cwd>/` are archon-owned. Anything else is yours.
+
+| Path | Stripped at boot? | Archon loads? | `archon setup` writes? |
+|------|-------------------|---------------|------------------------|
+| `<cwd>/.env` | **Yes** (safety guard) | Never | Never |
+| `<cwd>/.archon/.env` | No | Yes (repo scope, overrides user) | Yes, if `--scope project` |
+| `~/.archon/.env` | No | Yes (user scope) | Yes, if `--scope home` (default) |
+
+**Boot load order:**
+
+1. Strip keys Bun auto-loaded from `<cwd>/.env`, `.env.local`, `.env.development`, `.env.production` (prevents the target repo's env from leaking into Archon)
+2. Load `~/.archon/.env` with `override: true` (user scope)
+3. Load `<cwd>/.archon/.env` with `override: true` (repo scope wins over user scope)
+
+```bash
+# Set up user-wide credentials
+mkdir -p ~/.archon
+cp .env.example ~/.archon/.env
+
+# Per-project override (e.g., a different Slack webhook for this repo)
+mkdir -p /path/to/repo/.archon
+printf 'SLACK_BOT_TOKEN=xoxb-...\n' > /path/to/repo/.archon/.env
+```
+
+---
+
+## Streaming modes
+
+Each platform adapter supports two streaming modes, configurable via environment variable or `~/.archon/config.yaml`.
+
+<Tabs>
+  <Tab title="Stream mode">
+    Messages are sent in real-time as the AI generates responses.
+
+    ```bash
+    TELEGRAM_STREAMING_MODE=stream
+    SLACK_STREAMING_MODE=stream
+    DISCORD_STREAMING_MODE=stream
+    ```
+
+    **Pros:** Real-time feedback, engaging, progress visible as work happens.
+
+    **Cons:** More API calls, may hit rate limits with very long responses.
+
+    **Best for:** Interactive chat platforms like Telegram.
+  </Tab>
+  <Tab title="Batch mode">
+    Only the final summary message is sent after the AI completes processing.
+
+    ```bash
+    TELEGRAM_STREAMING_MODE=batch
+    SLACK_STREAMING_MODE=batch
+    DISCORD_STREAMING_MODE=batch
+    ```
+
+    **Pros:** Single coherent message, fewer API calls, no clutter.
+
+    **Cons:** No progress indication, longer wait for first response.
+
+    **Best for:** Issue trackers and async platforms like GitHub.
+  </Tab>
+</Tabs>
+
+**Platform defaults:**
+
+| Platform | Default mode |
+|----------|-------------|
+| Telegram | `stream` |
+| Discord | `batch` |
+| Slack | `batch` |
+| GitHub | `batch` |
+| Web UI | SSE streaming (always real-time, not configurable) |
+
+---
+
+## Troubleshooting config issues
+
+If your config file has invalid YAML syntax, Archon logs an error and falls back to defaults:
+
+```
+[Config] Failed to parse global config at ~/.archon/config.yaml: <error details>
+[Config] Using default configuration. Please fix the YAML syntax in your config file.
+```
+
+Common YAML pitfalls:
+- Indentation with tabs instead of spaces
+- Missing colons after keys
+- Unquoted values containing special characters (`:`, `{`, `}`, `[`, `]`)
+
+<CardGroup cols={2}>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    All CLI commands including the setup and doctor commands.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/reference/troubleshooting">
+    Common issues and their solutions including auth problems and port conflicts.
+  </Card>
+</CardGroup>
